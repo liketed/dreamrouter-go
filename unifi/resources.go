@@ -1,0 +1,214 @@
+package unifi
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+)
+
+// DNSRecord is a static DNS record (Settings → Routing → DNS). Numeric fields
+// a record type doesn't use are 0; a TTL of 0 means automatic.
+type DNSRecord struct {
+	ID         string `json:"_id,omitempty"`
+	RecordType string `json:"record_type"`
+	Key        string `json:"key"`
+	Value      string `json:"value"`
+	Enabled    bool   `json:"enabled"`
+	TTL        int64  `json:"ttl"`
+	Priority   int64  `json:"priority"`
+	Weight     int64  `json:"weight"`
+	Port       int64  `json:"port"`
+}
+
+// ListDNS returns all static DNS records.
+func (c *Client) ListDNS(ctx context.Context) ([]DNSRecord, error) {
+	return cachedList(c, ctx, &c.dnsCache, &c.dnsTime, func() ([]DNSRecord, error) {
+		var out []DNSRecord
+		err := c.do(ctx, http.MethodGet, c.v2("/static-dns"), nil, &out)
+		return out, err
+	})
+}
+
+// GetDNS returns the record with the given ID, or an error satisfying
+// IsNotFound. (The router has no call for a single record, so this lists them.)
+func (c *Client) GetDNS(ctx context.Context, id string) (DNSRecord, error) {
+	records, err := c.ListDNS(ctx)
+	if err != nil {
+		return DNSRecord{}, err
+	}
+	for _, r := range records {
+		if r.ID == id {
+			return r, nil
+		}
+	}
+	return DNSRecord{}, notFound("static-dns/" + id)
+}
+
+// CreateDNS adds a record and returns it as stored, including its ID.
+func (c *Client) CreateDNS(ctx context.Context, r DNSRecord) (DNSRecord, error) {
+	r.ID = ""
+	var out DNSRecord
+	err := c.write(ctx, http.MethodPost, c.v2("/static-dns"), r, &out)
+	return out, err
+}
+
+// UpdateDNS replaces the record with r.ID and returns it as stored.
+func (c *Client) UpdateDNS(ctx context.Context, r DNSRecord) (DNSRecord, error) {
+	if r.ID == "" {
+		return DNSRecord{}, fmt.Errorf("update: record has no ID")
+	}
+	var out DNSRecord
+	err := c.write(ctx, http.MethodPut, c.v2("/static-dns/"+r.ID), r, &out)
+	return out, err
+}
+
+// DeleteDNS removes the record with the given ID.
+func (c *Client) DeleteDNS(ctx context.Context, id string) error {
+	return c.write(ctx, http.MethodDelete, c.v2("/static-dns/"+id), nil, nil)
+}
+
+// Network is a network from Settings → Networks.
+type Network struct {
+	ID          string `json:"_id"`
+	Name        string `json:"name"`
+	Purpose     string `json:"purpose"`   // e.g. "corporate", "guest", "wan"
+	Subnet      string `json:"ip_subnet"` // gateway address with prefix, e.g. 192.168.1.1/24
+	VLAN        string `json:"vlan,omitempty"`
+	DHCPEnabled bool   `json:"dhcpd_enabled"`
+	DHCPStart   string `json:"dhcpd_start"`
+	DHCPStop    string `json:"dhcpd_stop"`
+	DomainName  string `json:"domain_name"`
+}
+
+// ListNetworks returns the configured networks.
+func (c *Client) ListNetworks(ctx context.Context) ([]Network, error) {
+	var env classicEnvelope
+	if err := c.do(ctx, http.MethodGet, c.classic("/rest/networkconf"), nil, &env); err != nil {
+		return nil, err
+	}
+	var out []Network
+	err := decodeClassic(http.MethodGet, "/rest/networkconf", env, &out)
+	return out, err
+}
+
+// ClientDevice is a device the Network application knows about. A DHCP
+// reservation is a client with UseFixedIP set; its DNS name is
+// LocalDNSRecord, which the router only serves while UseFixedIP is set.
+type ClientDevice struct {
+	ID                    string `json:"_id,omitempty"`
+	MAC                   string `json:"mac"`
+	Name                  string `json:"name,omitempty"`
+	Hostname              string `json:"hostname,omitempty"`
+	UseFixedIP            bool   `json:"use_fixedip"`
+	FixedIP               string `json:"fixed_ip,omitempty"`
+	NetworkID             string `json:"network_id,omitempty"`
+	LocalDNSRecord        string `json:"local_dns_record,omitempty"`
+	LocalDNSRecordEnabled bool   `json:"local_dns_record_enabled"`
+	LastIP                string `json:"last_ip,omitempty"`
+}
+
+// DisplayName is the client's name, falling back to its hostname.
+func (d ClientDevice) DisplayName() string {
+	if d.Name != "" {
+		return d.Name
+	}
+	return d.Hostname
+}
+
+// HasDNSName reports whether the router serves a DNS name for the device.
+func (d ClientDevice) HasDNSName() bool {
+	return d.UseFixedIP && d.LocalDNSRecordEnabled && d.LocalDNSRecord != ""
+}
+
+// ListClients returns every client the Network application knows about.
+func (c *Client) ListClients(ctx context.Context) ([]ClientDevice, error) {
+	return cachedList(c, ctx, &c.clientCache, &c.clientTime, func() ([]ClientDevice, error) {
+		var env classicEnvelope
+		if err := c.do(ctx, http.MethodGet, c.classic("/rest/user"), nil, &env); err != nil {
+			return nil, err
+		}
+		var out []ClientDevice
+		err := decodeClassic(http.MethodGet, "/rest/user", env, &out)
+		return out, err
+	})
+}
+
+// GetClient returns the client with the given ID, or an error satisfying IsNotFound.
+func (c *Client) GetClient(ctx context.Context, id string) (ClientDevice, error) {
+	clients, err := c.ListClients(ctx)
+	if err != nil {
+		return ClientDevice{}, err
+	}
+	for _, d := range clients {
+		if d.ID == id {
+			return d, nil
+		}
+	}
+	return ClientDevice{}, notFound("rest/user/" + id)
+}
+
+// CreateClient adds a client, e.g. a reservation for a device not seen yet.
+// fields uses the API's names: mac, name, use_fixedip, fixed_ip, network_id,
+// local_dns_record, local_dns_record_enabled.
+func (c *Client) CreateClient(ctx context.Context, fields map[string]any) (ClientDevice, error) {
+	return c.writeClient(ctx, http.MethodPost, "/rest/user", fields)
+}
+
+// UpdateClient changes the given fields of a client and returns it as stored.
+func (c *Client) UpdateClient(ctx context.Context, id string, fields map[string]any) (ClientDevice, error) {
+	return c.writeClient(ctx, http.MethodPut, "/rest/user/"+id, fields)
+}
+
+func (c *Client) writeClient(ctx context.Context, method, path string, fields map[string]any) (ClientDevice, error) {
+	var env classicEnvelope
+	if err := c.write(ctx, method, c.classic(path), fields, &env); err != nil {
+		return ClientDevice{}, err
+	}
+	var out []ClientDevice
+	if err := decodeClassic(method, path, env, &out); err != nil {
+		return ClientDevice{}, err
+	}
+	if len(out) == 0 {
+		return ClientDevice{}, fmt.Errorf("%s %s: empty response", method, path)
+	}
+	return out[0], nil
+}
+
+// ForgetClient removes a client entirely, including its name and history.
+func (c *Client) ForgetClient(ctx context.Context, mac string) error {
+	var env classicEnvelope
+	return c.write(ctx, http.MethodPost, c.classic("/cmd/stamgr"),
+		map[string]any{"cmd": "forget-sta", "macs": []string{mac}}, &env)
+}
+
+func notFound(path string) error {
+	return &APIError{Method: http.MethodGet, Path: path, Status: http.StatusNotFound, Message: "not found"}
+}
+
+// cachedList returns a fresh copy of the cached list if it is younger than
+// CacheTTL, or fetches it. cacheMu is held while fetching, so concurrent
+// callers share one request.
+func cachedList[T any](c *Client, _ context.Context, cache *[]T, at *time.Time, fetch func() ([]T, error)) ([]T, error) {
+	if c.cfg.CacheTTL <= 0 {
+		out, err := fetch()
+		if out == nil && err == nil {
+			out = []T{}
+		}
+		return out, err
+	}
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	if *cache != nil && time.Since(*at) < c.cfg.CacheTTL {
+		return append([]T(nil), (*cache)...), nil
+	}
+	out, err := fetch()
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []T{}
+	}
+	*cache, *at = out, time.Now()
+	return append([]T(nil), out...), nil
+}
