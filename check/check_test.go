@@ -124,3 +124,30 @@ func TestNetworkFor(t *testing.T) {
 		t.Errorf("unknown network: %v", err)
 	}
 }
+
+func TestBootAndTFTP(t *testing.T) {
+	if err := check.Boot("192.168.1.20", "efi64/syslinux.efi"); err != nil {
+		t.Errorf("valid boot settings rejected: %v", err)
+	}
+	for _, tc := range []struct{ server, file, want string }{
+		{"boot.home.internal", "a.efi", "must be an IPv4 address"},
+		{"999.1.1.1", "a.efi", "must be an IPv4 address"},
+		{"192.168.1.20", "", "must not be empty"},
+		{"192.168.1.20", "a,b.efi", "spaces or commas"},
+		{"192.168.1.20", "a b.efi", "spaces or commas"},
+	} {
+		if err := check.Boot(tc.server, tc.file); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Boot(%q, %q) = %v, want %q", tc.server, tc.file, err, tc.want)
+		}
+	}
+	for _, ok := range []string{"tftp.home.internal", "192.168.1.20"} {
+		if err := check.TFTPServer(ok); err != nil {
+			t.Errorf("TFTPServer(%q) = %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "a,b", "a b"} {
+		if err := check.TFTPServer(bad); err == nil {
+			t.Errorf("TFTPServer(%q) accepted", bad)
+		}
+	}
+}

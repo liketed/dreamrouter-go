@@ -1,8 +1,8 @@
 # dreamrouter-go
 
 Go packages for managing a UniFi Dream Router 7 (or other UniFi OS gateway): static
-DNS records, DHCP reservations and device DNS names, through the UniFi Network
-application's API.
+DNS records, DHCP reservations, device DNS names and network DHCP settings (network
+boot, TFTP server), through the UniFi Network application's API.
 
 It is the shared code behind:
 
@@ -16,8 +16,8 @@ go get github.com/liketed/dreamrouter-go
 
 | Package | Contents |
 |---|---|
-| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations and device DNS names), networks. Optional shared cache for concurrent readers. |
-| [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, and which network a reserved IP belongs to. |
+| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations and device DNS names), networks and their DHCP settings. Optional shared cache for concurrent readers. |
+| [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, and network boot / TFTP values. |
 | [`fakerouter`](fakerouter) | An in-memory fake of the router's API for tests, with the router's error codes and login limit. |
 
 ## Example
@@ -83,6 +83,12 @@ These are behaviours of the router itself, found while building drctl and the pr
 - **DHCP reservations** are stored on the client (`use_fixedip`, `fixed_ip`,
   `network_id`). A device's DNS name (`local_dns_record`) is only served while it has a
   fixed IP. Clearing `use_fixedip` keeps the device; `ForgetClient` removes it entirely.
+- **Network boot** (`dhcpd_boot_*` on a network) becomes dnsmasq's
+  `dhcp-boot=...,FILE,,SERVER`; the TFTP server (`dhcpd_tftp_server`, option 66) is handed
+  out whenever set, even with network boot off. The router won't accept an empty boot
+  file once one is stored, and it accepts commas, spaces and host names that would break
+  the dnsmasq line, so validate with `check.Boot` and `check.TFTPServer`. There are no
+  per-device boot settings: reservations only hold a MAC address and IP.
 - **Propagation.** Changes reach the router's DNS and DHCP server (dnsmasq) about
   10–20 seconds after the API call returns.
 - This is the Network application's internal, undocumented API, the one its web UI

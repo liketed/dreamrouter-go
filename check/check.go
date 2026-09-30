@@ -272,3 +272,29 @@ func NetworkNames(networks []unifi.Network) string {
 	sort.Strings(names)
 	return strings.Join(names, ", ")
 }
+
+// dnsmasqValue matches values that are safe inside a comma-separated dnsmasq
+// option line. (The router itself accepts commas and spaces, which would
+// corrupt the line it generates.)
+var dnsmasqValue = regexp.MustCompile(`^[^\s,]+$`)
+
+// Boot checks network boot settings: server must be an IPv4 address (dnsmasq
+// needs an address there) and file a single token without commas.
+func Boot(server, file string) error {
+	if _, err := IPv4(server); err != nil {
+		return fmt.Errorf("boot server %q must be an IPv4 address", server)
+	}
+	if !dnsmasqValue.MatchString(file) {
+		return fmt.Errorf("boot file %q must not be empty or contain spaces or commas", file)
+	}
+	return nil
+}
+
+// TFTPServer checks a TFTP server (DHCP option 66): a host name or IP address
+// without spaces or commas.
+func TFTPServer(s string) error {
+	if !dnsmasqValue.MatchString(s) {
+		return fmt.Errorf("TFTP server %q must be a host name or IP address without spaces or commas", s)
+	}
+	return nil
+}

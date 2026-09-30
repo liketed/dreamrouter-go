@@ -308,3 +308,35 @@ func TestWrongPasswordNotRetried(t *testing.T) {
 		t.Fatalf("wrong password retried or accepted: %v", err)
 	}
 }
+
+func TestUpdateNetworkBoot(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+
+	n, err := c.UpdateNetwork(ctx, fakerouter.NetworkID, map[string]any{"dhcpd_boot_enabled": true,
+		"dhcpd_boot_server": "192.168.1.20", "dhcpd_boot_filename": "netboot.xyz.efi", "dhcpd_tftp_server": "tftp.home.internal"})
+	if err != nil || !n.BootEnabled || n.BootServer != "192.168.1.20" || n.BootFilename != "netboot.xyz.efi" ||
+		n.TFTPServer != "tftp.home.internal" || n.DHCPStart != "192.168.1.6" {
+		t.Fatalf("UpdateNetwork = %+v, %v (other settings must be kept)", n, err)
+	}
+	nets, _ := c.ListNetworks(ctx)
+	if !nets[0].BootEnabled || nets[0].BootFilename != "netboot.xyz.efi" {
+		t.Fatalf("ListNetworks after update: %+v", nets[0])
+	}
+	// The router's quirks, mirrored by the fake.
+	for name, fields := range map[string]map[string]any{
+		"empty file":      {"dhcpd_boot_filename": ""},
+		"null file":       {"dhcpd_boot_filename": nil},
+		"bad IP":          {"dhcpd_boot_server": "999.1.1.1"},
+		"on without file": {"dhcpd_boot_enabled": true, "dhcpd_boot_filename": ""},
+	} {
+		if _, err := c.UpdateNetwork(ctx, fakerouter.NetworkID, fields); !unifi.HasCode(err, "api.err.InvalidPayload") {
+			t.Errorf("%s: err = %v, want InvalidPayload", name, err)
+		}
+	}
+	if _, err := c.UpdateNetwork(ctx, "nope", map[string]any{"dhcpd_boot_enabled": false}); !unifi.IsNotFound(err) {
+		t.Errorf("unknown network: %v", err)
+	}
+}

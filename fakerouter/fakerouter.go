@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -61,16 +62,22 @@ type Router struct {
 	logins    int
 	limit     int // successful logins allowed in total before 429; 0 = unlimited
 	listCalls int
+	networks  []map[string]any
 }
 
 // New starts a fake router with one network, "Default", 192.168.1.1/24.
 func New() *Router {
-	r := &Router{sessions: map[string]bool{}}
+	r := &Router{sessions: map[string]bool{}, networks: []map[string]any{
+		{"_id": NetworkID, "name": "Default", "purpose": "corporate", "ip_subnet": "192.168.1.1/24",
+			"dhcpd_enabled": true, "dhcpd_start": "192.168.1.6", "dhcpd_stop": "192.168.1.254", "domain_name": "localdomain"},
+		{"_id": "net-wan", "name": "Internet 1", "purpose": "wan"},
+	}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/login", r.login)
 	mux.HandleFunc("/proxy/network/v2/api/site/default/static-dns", r.dnsCollection)
 	mux.HandleFunc("/proxy/network/v2/api/site/default/static-dns/", r.dnsItem)
-	mux.HandleFunc("/proxy/network/api/s/default/rest/networkconf", r.networks)
+	mux.HandleFunc("/proxy/network/api/s/default/rest/networkconf", r.networkCollection)
+	mux.HandleFunc("/proxy/network/api/s/default/rest/networkconf/", r.networkItem)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user", r.userCollection)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user/", r.userItem)
 	mux.HandleFunc("/proxy/network/api/s/default/cmd/stamgr", r.stamgr)
@@ -361,17 +368,100 @@ func (r *Router) validateDNS(w http.ResponseWriter, rec DNSRecord, selfID string
 
 // ---- networks and clients (classic) ----
 
-func (r *Router) networks(w http.ResponseWriter, req *http.Request) {
+func (r *Router) networkCollection(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.authorised(w, req) {
 		return
 	}
-	classicOK(w, []map[string]any{
-		{"_id": NetworkID, "name": "Default", "purpose": "corporate", "ip_subnet": "192.168.1.1/24",
-			"dhcpd_enabled": true, "dhcpd_start": "192.168.1.6", "dhcpd_stop": "192.168.1.254", "domain_name": "localdomain"},
-		{"_id": "net-wan", "name": "Internet 1", "purpose": "wan"},
-	})
+	classicOK(w, r.networks)
+}
+
+// Network returns a copy of the stored network with the given name.
+func (r *Router) Network(name string) map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, n := range r.networks {
+		if n["name"] == name {
+			c := map[string]any{}
+			for k, v := range n {
+				c[k] = v
+			}
+			return c
+		}
+	}
+	return nil
+}
+
+// ModifyNetwork changes a stored network directly, as someone using the web
+// UI would.
+func (r *Router) ModifyNetwork(name string, fn func(map[string]any)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, n := range r.networks {
+		if n["name"] == name {
+			fn(n)
+		}
+	}
+}
+
+var digitsAndDots = regexp.MustCompile(`^[0-9.]+$`)
+
+// networkItem updates a network, with the real router's checks for network
+// boot settings: an empty or null boot file is rejected (even with boot off),
+// as is boot on without a file, and a server that looks like an IP but isn't
+// one. Host names, spaces and commas are accepted, as on the real router.
+func (r *Router) networkItem(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	id := req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
+	if req.Method != http.MethodPut {
+		classicErr(w, http.StatusMethodNotAllowed, "api.err.MethodNotAllowed")
+		return
+	}
+	var fields map[string]any
+	if json.NewDecoder(req.Body).Decode(&fields) != nil {
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+		return
+	}
+	for _, n := range r.networks {
+		if n["_id"] != id {
+			continue
+		}
+		updated := map[string]any{}
+		for k, v := range n {
+			updated[k] = v
+		}
+		for k, v := range fields {
+			updated[k] = v
+		}
+		if v, ok := fields["dhcpd_boot_filename"]; ok {
+			if s, _ := v.(string); s == "" {
+				classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+				return
+			}
+		}
+		if s, _ := updated["dhcpd_boot_server"].(string); s != "" && digitsAndDots.MatchString(s) && net.ParseIP(s) == nil {
+			classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+			return
+		}
+		if on, _ := updated["dhcpd_boot_enabled"].(bool); on {
+			if f, _ := updated["dhcpd_boot_filename"].(string); f == "" {
+				classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+				return
+			}
+		}
+		updated["setting_preference"] = "manual" // as the web UI does on every save
+		for k := range updated {
+			n[k] = updated[k]
+		}
+		classicOK(w, []map[string]any{n})
+		return
+	}
+	classicErr(w, http.StatusNotFound, "api.err.NotFound")
 }
 
 func (r *Router) userCollection(w http.ResponseWriter, req *http.Request) {

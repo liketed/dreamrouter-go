@@ -79,6 +79,17 @@ type Network struct {
 	DHCPStart   string `json:"dhcpd_start"`
 	DHCPStop    string `json:"dhcpd_stop"`
 	DomainName  string `json:"domain_name"`
+
+	// Network boot (PXE). The router serves these as dnsmasq
+	// "dhcp-boot=...,FILE,,SERVER" while BootEnabled is set. It won't accept
+	// an empty BootFilename once one has been stored, so turning network boot
+	// off keeps the server and file.
+	BootEnabled  bool   `json:"dhcpd_boot_enabled"`
+	BootServer   string `json:"dhcpd_boot_server"`
+	BootFilename string `json:"dhcpd_boot_filename"`
+	// TFTPServer is DHCP option 66. It is handed out whenever it is set,
+	// independently of BootEnabled.
+	TFTPServer string `json:"dhcpd_tftp_server"`
 }
 
 // ListNetworks returns the configured networks.
@@ -90,6 +101,25 @@ func (c *Client) ListNetworks(ctx context.Context) ([]Network, error) {
 	var out []Network
 	err := decodeClassic(http.MethodGet, "/rest/networkconf", env, &out)
 	return out, err
+}
+
+// UpdateNetwork changes the given fields of a network (API names, e.g.
+// "dhcpd_boot_enabled") and returns it as stored. Only the fields given are
+// changed.
+func (c *Client) UpdateNetwork(ctx context.Context, id string, fields map[string]any) (Network, error) {
+	var env classicEnvelope
+	path := "/rest/networkconf/" + id
+	if err := c.write(ctx, http.MethodPut, c.classic(path), fields, &env); err != nil {
+		return Network{}, err
+	}
+	var out []Network
+	if err := decodeClassic(http.MethodPut, path, env, &out); err != nil {
+		return Network{}, err
+	}
+	if len(out) == 0 {
+		return Network{}, fmt.Errorf("PUT %s: empty response", path)
+	}
+	return out[0], nil
 }
 
 // ClientDevice is a device the Network application knows about. A DHCP
