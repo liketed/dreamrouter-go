@@ -340,3 +340,40 @@ func TestUpdateNetworkBoot(t *testing.T) {
 		t.Errorf("unknown network: %v", err)
 	}
 }
+
+func TestListLeases(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+	if leases, err := c.ListLeases(ctx); err != nil || len(leases) != 0 {
+		t.Fatalf("empty: %v %v", leases, err)
+	}
+	r.PutLease(fakerouter.Lease{IP: "192.168.1.37", MAC: "aa:bb:cc:00:00:37", Hostname: "tv", OUI: "Samsung",
+		Status: "online", ClientType: "WIRED", ExpiresUnix: 1791058231})
+	r.PutClient(fakerouter.Client{MAC: "aa:bb:cc:00:00:37", Name: "Living room TV", UseFixedIP: true, FixedIP: "192.168.1.37"})
+	leases, err := c.ListLeases(ctx)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("ListLeases = %v, %v", leases, err)
+	}
+	l := leases[0]
+	if l.Label() != "tv" || !l.UseFixedIP || l.Expires().Unix() != 1791058231 || l.OUI != "Samsung" {
+		t.Fatalf("lease %+v", l)
+	}
+	for _, tc := range []struct {
+		l    unifi.Lease
+		want string
+	}{
+		{unifi.Lease{MAC: "86:23:5b:ad:d1:21", DisplayName: "iPhone d1:21", Hostname: "iphone"}, "iPhone"},
+		{unifi.Lease{MAC: "86:23:5b:ad:d1:21", Name: "Steve's phone", DisplayName: "iPhone d1:21"}, "Steve's phone"},
+		{unifi.Lease{MAC: "86:23:5b:ad:d1:21", Hostname: "iphone"}, "iphone"},
+		{unifi.Lease{MAC: "86:23:5b:ad:d1:21", DisplayName: "Kitchen 12:34"}, "Kitchen 12:34"},
+	} {
+		if got := tc.l.Label(); got != tc.want {
+			t.Errorf("Label(%+v) = %q, want %q", tc.l, got, tc.want)
+		}
+	}
+	if (unifi.Lease{}).Expires() != (time.Time{}) {
+		t.Fatal("unknown expiry should be the zero time")
+	}
+}

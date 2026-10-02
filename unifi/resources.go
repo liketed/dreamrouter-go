@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -241,4 +242,62 @@ func cachedList[T any](c *Client, _ context.Context, cache *[]T, at *time.Time, 
 	}
 	*cache, *at = out, time.Now()
 	return append([]T(nil), out...), nil
+}
+
+// Lease is a DHCP lease as reported by the router (active-leases): which
+// device has which address, and until when. Reserved devices (UseFixedIP)
+// also have leases.
+type Lease struct {
+	IP             string  `json:"ip"`
+	MAC            string  `json:"mac"`
+	Hostname       string  `json:"hostname"`
+	Name           string  `json:"name"`
+	DisplayName    string  `json:"display_name"`
+	OUI            string  `json:"oui"` // manufacturer, from the MAC address
+	NetworkID      string  `json:"network_id"`
+	Status         string  `json:"status"`      // "online" or "offline"
+	ClientType     string  `json:"client_type"` // "WIRED" or "WIRELESS"
+	UseFixedIP     bool    `json:"use_fixedip"`
+	FixedIP        string  `json:"fixed_ip"`
+	LocalDNSRecord string  `json:"local_dns_record"`
+	ExpiresUnix    float64 `json:"lease_expiration_time"` // seconds since 1970; 0 if unknown
+}
+
+// Label is the best available name for the device: the name set in the web
+// UI, else the router's display name, else the device's host name. For
+// unnamed devices the router appends the last two bytes of the MAC address to
+// the display name ("iPhone d1:21"); that suffix is dropped.
+func (l Lease) Label() string {
+	if l.Name != "" {
+		return l.Name
+	}
+	if d := l.DisplayName; d != "" {
+		if len(l.MAC) == 17 {
+			d = strings.TrimSuffix(d, " "+l.MAC[12:])
+		}
+		return d
+	}
+	return l.Hostname
+}
+
+// Expires returns when the lease expires, or the zero time if unknown.
+func (l Lease) Expires() time.Time {
+	if l.ExpiresUnix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(int64(l.ExpiresUnix), 0)
+}
+
+// ListLeases returns the router's current DHCP leases.
+func (c *Client) ListLeases(ctx context.Context) ([]Lease, error) {
+	var out struct {
+		Info []Lease `json:"dhcp_lease_info"`
+	}
+	if err := c.do(ctx, http.MethodGet, c.v2("/active-leases"), nil, &out); err != nil {
+		return nil, err
+	}
+	if out.Info == nil {
+		out.Info = []Lease{}
+	}
+	return out.Info, nil
 }

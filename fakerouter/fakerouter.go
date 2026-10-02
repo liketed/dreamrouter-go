@@ -63,6 +63,57 @@ type Router struct {
 	limit     int // successful logins allowed in total before 429; 0 = unlimited
 	listCalls int
 	networks  []map[string]any
+	leases    []Lease
+}
+
+// Lease is a DHCP lease, as listed by active-leases.
+type Lease struct {
+	IP             string  `json:"ip"`
+	MAC            string  `json:"mac"`
+	Hostname       string  `json:"hostname,omitempty"`
+	Name           string  `json:"name,omitempty"`
+	DisplayName    string  `json:"display_name,omitempty"`
+	OUI            string  `json:"oui,omitempty"`
+	NetworkID      string  `json:"network_id"`
+	Status         string  `json:"status,omitempty"`
+	ClientType     string  `json:"client_type,omitempty"`
+	UseFixedIP     bool    `json:"use_fixedip"`
+	FixedIP        string  `json:"fixed_ip,omitempty"`
+	LocalDNSRecord string  `json:"local_dns_record,omitempty"`
+	ExpiresUnix    float64 `json:"lease_expiration_time"`
+}
+
+// PutLease adds a DHCP lease, as if a device had been given an address.
+func (r *Router) PutLease(l Lease) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if l.NetworkID == "" {
+		l.NetworkID = NetworkID
+	}
+	r.leases = append(r.leases, l)
+}
+
+func (r *Router) activeLeases(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	// Reservations made since the lease was handed out show in the listing,
+	// as on the real router.
+	out := make([]Lease, 0, len(r.leases))
+	for _, l := range r.leases {
+		for _, c := range r.clients {
+			if c.MAC == l.MAC {
+				l.UseFixedIP, l.FixedIP = c.UseFixedIP, c.FixedIP
+				if c.LocalDNSRecordEnabled {
+					l.LocalDNSRecord = c.LocalDNSRecord
+				}
+			}
+		}
+		out = append(out, l)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"dhcp_lease_info": out})
 }
 
 // New starts a fake router with one network, "Default", 192.168.1.1/24.
@@ -76,6 +127,7 @@ func New() *Router {
 	mux.HandleFunc("/api/auth/login", r.login)
 	mux.HandleFunc("/proxy/network/v2/api/site/default/static-dns", r.dnsCollection)
 	mux.HandleFunc("/proxy/network/v2/api/site/default/static-dns/", r.dnsItem)
+	mux.HandleFunc("/proxy/network/v2/api/site/default/active-leases", r.activeLeases)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/networkconf", r.networkCollection)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/networkconf/", r.networkItem)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user", r.userCollection)
