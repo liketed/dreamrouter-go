@@ -612,3 +612,38 @@ func TestBackups(t *testing.T) {
 		t.Fatalf("junk upload: %v", err)
 	}
 }
+
+func TestSSH(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+	s, err := c.GetSSH(ctx)
+	if err != nil || !s.Router || !s.Devices || s.DevicesUsername != "fakeadmin" || !s.DevicesPasswordAuth {
+		t.Fatalf("GetSSH = %+v, %v", s, err)
+	}
+	if err := c.SetRouterSSH(ctx, false); err != nil || r.RouterSSH() {
+		t.Fatalf("SetRouterSSH(false): %v, on=%v", err, r.RouterSSH())
+	}
+	if s, _ := c.GetSSH(ctx); s.Router {
+		t.Fatal("GetSSH still reports router SSH on")
+	}
+	if err := c.SetRouterSSH(ctx, true); err != nil || !r.RouterSSH() {
+		t.Fatalf("SetRouterSSH(true): %v", err)
+	}
+	// Setting device SSH to what it already is writes nothing (each write
+	// makes the router issue a new device API token).
+	if err := c.SetDevicesSSH(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, writes := r.Mgmt(); writes != 0 {
+		t.Fatalf("no-op SetDevicesSSH wrote %d times", writes)
+	}
+	if err := c.SetDevicesSSH(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	m, writes := r.Mgmt()
+	if m["x_ssh_enabled"] != false || writes != 1 || m["x_ssh_username"] != "fakeadmin" {
+		t.Fatalf("SetDevicesSSH(false): %v (%d writes)", m, writes)
+	}
+}

@@ -16,7 +16,7 @@ go get github.com/liketed/dreamrouter-go
 
 | Package | Contents |
 |---|---|
-| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, backups and restores (with the automatic backup schedule), the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
+| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, backups and restores (with the automatic backup schedule), SSH settings, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
 | [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, network boot / TFTP values, and port forwards (including the conflicts the router doesn't check). |
 | [`fakerouter`](fakerouter) | An in-memory fake of the router's API for tests, with the router's error codes and login limit. |
 
@@ -112,6 +112,12 @@ These are behaviours of the router itself, found while building drctl and the pr
   `backup_id` makes the router fail with HTTP 500.)
 - **Console backups** (`/api/backup/...`, all apps and UniFi OS users) need the console
   owner's account; a local admin gets `ACTION_FORBIDDEN`.
+- **SSH.** There are two settings. SSH to the router itself is UniFi OS's: `ssh` in
+  `GET /api/system`, changed with `PATCH /api/system` `{"ssh":{"enabled":…}}` (the root
+  password is set separately, with `POST /api/system/ssh/setpassword`, not wrapped
+  here). SSH to adopted devices is the Network `mgmt` setting (`x_ssh_enabled`,
+  `x_ssh_username`, …); **every write of `mgmt` gives it a new `x_api_token`**, even an
+  unchanged one, so `SetDevicesSSH` only writes when something changes.
 - **Status** (`GetStatus`) combines `stat/health`, `stat/sysinfo` and the router's entry
   in `stat/device`. Some numbers come as strings (CPU `"13.9"`), others as numbers, and
   the access point and switch counts include the router's built-in Wi-Fi and switch.

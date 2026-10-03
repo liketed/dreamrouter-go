@@ -112,6 +112,49 @@ type Router struct {
 	staged      map[string][]byte // uploaded backups by backup_id
 	schedule    map[string]any    // the super_mgmt setting
 	restores    int
+	mgmt        map[string]any // the mgmt setting (device SSH)
+	routerSSH   bool
+	mgmtWrites  int
+}
+
+// RouterSSH reports whether SSH to the router is on.
+func (r *Router) RouterSSH() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.routerSSH
+}
+
+// Mgmt returns the stored mgmt setting (device SSH), and how many times it
+// has been written. Each write gives it a new x_api_token, as on the router.
+func (r *Router) Mgmt() (map[string]any, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := map[string]any{}
+	for k, v := range r.mgmt {
+		c[k] = v
+	}
+	return c, r.mgmtWrites
+}
+
+// system serves UniFi OS's /api/system: GET, and PATCH of ssh.enabled.
+func (r *Router) system(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	if req.Method == http.MethodPatch {
+		var body struct {
+			SSH *struct {
+				Enabled *bool `json:"enabled"`
+			} `json:"ssh"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&body)
+		if body.SSH != nil && body.SSH.Enabled != nil {
+			r.routerSSH = *body.SSH.Enabled
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": "Dream Router 7", "ssh": r.routerSSH, "isSetup": true})
 }
 
 // AutoBackup is one of the router's automatic backups.
@@ -302,19 +345,29 @@ func (r *Router) settings(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if req.Method == http.MethodPut {
-		if req.URL.Path != "/proxy/network/api/s/default/rest/setting/super_mgmt/"+r.schedule["_id"].(string) {
+		var target map[string]any
+		for _, set := range []map[string]any{r.schedule, r.mgmt} {
+			if req.URL.Path == "/proxy/network/api/s/default/rest/setting/"+set["key"].(string)+"/"+set["_id"].(string) {
+				target = set
+			}
+		}
+		if target == nil {
 			classicErr(w, http.StatusBadRequest, "api.err.IdInvalid")
 			return
 		}
 		var body map[string]any
 		_ = json.NewDecoder(req.Body).Decode(&body)
 		for k, v := range body {
-			r.schedule[k] = v
+			target[k] = v
 		}
-		classicOK(w, []map[string]any{r.schedule})
+		if target["key"] == "mgmt" {
+			r.mgmtWrites++
+			target["x_api_token"] = fmt.Sprintf("token-%d", r.mgmtWrites)
+		}
+		classicOK(w, []map[string]any{target})
 		return
 	}
-	classicOK(w, []map[string]any{r.schedule, {"_id": "set-ntp", "key": "ntp", "setting_preference": "auto"}})
+	classicOK(w, []map[string]any{r.schedule, r.mgmt, {"_id": "set-ntp", "key": "ntp", "setting_preference": "auto"}})
 }
 
 // PortForwards returns the stored port forwarding rules, as raw JSON objects.
@@ -681,6 +734,10 @@ func New() *Router {
 	mux.HandleFunc("/proxy/network/upload/backup", r.uploadBackup)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/setting", r.settings)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/setting/", r.settings)
+	r.routerSSH = true
+	r.mgmt = map[string]any{"_id": "set-mgmt", "key": "mgmt", "x_ssh_enabled": true, "x_ssh_username": "fakeadmin",
+		"x_ssh_password": "fake-password", "x_ssh_auth_password_enabled": true, "x_ssh_bind_wildcard": false, "x_api_token": "token-0"}
+	mux.HandleFunc("/api/system", r.system)
 	r.schedule = map[string]any{"_id": "set-super-mgmt", "key": "super_mgmt", "autobackup_enabled": true,
 		"autobackup_cron_expr": "30 0 1 * *", "autobackup_timezone": "Europe/Dublin", "autobackup_days": 0}
 	mux.HandleFunc("/proxy/network/api/s/default/rest/portforward", r.portForwards)
