@@ -442,3 +442,66 @@ func TestClientStatusAndBlocking(t *testing.T) {
 		t.Fatalf("note: %+v", d)
 	}
 }
+
+func TestGetStatus(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+
+	s, err := c.GetStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := unifi.Status{
+		Name: "Dream Router 7", Model: "UDMA67A", OSVersion: "5.1.33", NetworkVersion: "10.6.106", Timezone: "Europe/Dublin",
+		Uptime:  581855 * time.Second,
+		Clients: 42, Wired: 20, WiFi: 22, Guests: 1, AccessPoints: 1, Switches: 1,
+	}
+	if s.Name != want.Name || s.Model != want.Model || s.OSVersion != want.OSVersion || s.NetworkVersion != want.NetworkVersion ||
+		s.Timezone != want.Timezone || s.Uptime != want.Uptime || s.Clients != want.Clients || s.Wired != want.Wired ||
+		s.WiFi != want.WiFi || s.Guests != want.Guests || s.AccessPoints != want.AccessPoints || s.Switches != want.Switches {
+		t.Fatalf("GetStatus = %+v", s)
+	}
+	in := s.Internet
+	if in.Status != "ok" || !in.Up || in.IP != "203.0.113.7" || in.ISP != "Example ISP" || in.ASN != 64500 || in.Interface != "eth3" ||
+		in.LinkMbps != 2500 || in.LatencyMs != 15 || in.Availability != 99.5 || in.Drops != 2 || !in.PPPoE ||
+		in.InternetUptime != 196631*time.Second {
+		t.Fatalf("Internet = %+v", in)
+	}
+	// CPU and memory come as strings ("13.9"), memory sizes and temperature as numbers.
+	sy := s.System
+	if sy.CPUPercent != 13.9 || sy.MemoryPercent != 58.2 || sy.MemoryTotal != 3009642496 || sy.MemoryUsed != 1752711168 ||
+		sy.Load1 != 2.75 || sy.CPUTempC != 60.5 || sy.Overheating {
+		t.Fatalf("System = %+v", sy)
+	}
+	if len(s.Devices) != 2 || s.Devices[1].Name != "U7 Pro" || s.Devices[1].Version != "8.7.11.19419" || !s.Devices[1].Online ||
+		s.UpdateAvailable || !s.SpeedTest.Run.IsZero() {
+		t.Fatalf("Devices/updates/speed test = %+v %v %+v", s.Devices, s.UpdateAvailable, s.SpeedTest)
+	}
+	if s.Subsystems["vpn"] != "unknown" || s.Subsystems["www"] != "ok" {
+		t.Fatalf("Subsystems = %v", s.Subsystems)
+	}
+
+	// A firmware update, a speed test, and numbers the router sends as strings.
+	r.ModifyStat(func(st *fakerouter.Stat) {
+		st.Devices[1]["upgradable"], st.Devices[1]["upgrade_to_firmware"] = true, "8.8.0.1"
+		st.Devices[0]["speedtest-status"] = map[string]any{"rundate": 1791013530, "xput_download": 2210.4, "xput_upload": "105.2",
+			"latency": 7, "server": map[string]any{"provider": "Example ISP", "city": "Dublin"}}
+		st.Health[2]["latency"] = "18"
+	})
+	s, err = c.GetStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.UpdateAvailable || s.Devices[1].UpgradeTo != "8.8.0.1" {
+		t.Fatalf("update not reported: %+v", s.Devices)
+	}
+	st := s.SpeedTest
+	if st.Run.Unix() != 1791013530 || st.DownloadMbps != 2210.4 || st.UploadMbps != 105.2 || st.PingMs != 7 || st.Server != "Example ISP, Dublin" {
+		t.Fatalf("SpeedTest = %+v", st)
+	}
+	if s.Internet.LatencyMs != 18 {
+		t.Fatalf("latency as a string: %d", s.Internet.LatencyMs)
+	}
+}

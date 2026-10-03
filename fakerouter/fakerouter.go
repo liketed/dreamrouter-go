@@ -101,6 +101,63 @@ type Router struct {
 	leases    []Lease
 	active    []Status
 	offline   []Status
+	stat      Stat
+}
+
+// Stat is what the router reports for stat/health, stat/sysinfo and
+// stat/device, as raw JSON objects. Defaults resemble a Dream Router 7 with
+// one access point; change them with ModifyStat.
+type Stat struct {
+	Health  []map[string]any
+	Sysinfo map[string]any
+	Devices []map[string]any
+}
+
+func defaultStat() Stat {
+	return Stat{
+		Health: []map[string]any{
+			{"subsystem": "wlan", "status": "ok", "num_user": 21, "num_guest": 1, "num_ap": 1},
+			{"subsystem": "wan", "status": "ok", "wan_ip": "203.0.113.7", "num_sta": 42, "isp_name": "Example ISP", "asn": 64500,
+				"gw_system-stats": map[string]any{"cpu": "13.9", "mem": "58.2", "uptime": "581852"},
+				"uptime_stats":    map[string]any{"WAN": map[string]any{"availability": 99.5, "latency_average": 6}}},
+			{"subsystem": "www", "status": "ok", "latency": 15, "uptime": 196631, "drops": 2},
+			{"subsystem": "lan", "status": "ok", "num_user": 20, "num_guest": 0, "num_sw": 1},
+			{"subsystem": "vpn", "status": "unknown"},
+		},
+		Sysinfo: map[string]any{"name": "Dream Router 7", "version": "10.6.106", "console_display_version": "5.1.33",
+			"timezone": "Europe/Dublin", "uptime": 581855, "update_available": false},
+		Devices: []map[string]any{
+			{"type": "udm", "model": "UDMA67A", "name": "Dream Router 7", "mac": "94:2a:6f:00:00:01", "ip": "203.0.113.7",
+				"version": "5.1.33.34087", "upgradable": false, "state": 1, "uptime": 581852, "num_sta": 42,
+				"system-stats": map[string]any{"cpu": "13.9", "mem": "58.2", "uptime": "581852"},
+				"sys_stats":    map[string]any{"loadavg_1": "2.75", "mem_total": 3009642496, "mem_used": 1752711168},
+				"temperatures": []any{map[string]any{"name": "CPU", "type": "cpu", "value": 60.5}},
+				"uplink":       map[string]any{"name": "ppp0", "ip": "203.0.113.7", "up": true, "speed": 10000, "latency": 15},
+				"wan1":         map[string]any{"name": "eth3", "ip": "203.0.113.7", "up": true, "speed": 2500, "latency": 5},
+				"speedtest-status": map[string]any{"rundate": 0, "xput_download": 0.0, "xput_upload": 0.0, "latency": 0,
+					"server": map[string]any{"provider": "", "city": ""}}},
+			{"type": "uap", "model": "U7PRO", "name": "U7 Pro", "mac": "94:2a:6f:00:00:02", "ip": "192.168.1.3",
+				"version": "8.7.11.19419", "upgradable": false, "state": 1, "uptime": 990000, "num_sta": 18},
+		},
+	}
+}
+
+// ModifyStat changes what the status endpoints report.
+func (r *Router) ModifyStat(fn func(*Stat)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fn(&r.stat)
+}
+
+func (r *Router) statHandler(data func() any) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if !r.authorised(w, req) {
+			return
+		}
+		classicOK(w, data())
+	}
 }
 
 // PutActive adds a connected device to clients/active.
@@ -221,6 +278,10 @@ func New() *Router {
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user", r.userCollection)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user/", r.userItem)
 	mux.HandleFunc("/proxy/network/api/s/default/cmd/stamgr", r.stamgr)
+	mux.HandleFunc("/proxy/network/api/s/default/stat/health", r.statHandler(func() any { return r.stat.Health }))
+	mux.HandleFunc("/proxy/network/api/s/default/stat/sysinfo", r.statHandler(func() any { return []map[string]any{r.stat.Sysinfo} }))
+	mux.HandleFunc("/proxy/network/api/s/default/stat/device", r.statHandler(func() any { return r.stat.Devices }))
+	r.stat = defaultStat()
 	r.Server = httptest.NewTLSServer(mux)
 	return r
 }

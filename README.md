@@ -16,7 +16,7 @@ go get github.com/liketed/dreamrouter-go
 
 | Package | Contents |
 |---|---|
-| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
+| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
 | [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, and network boot / TFTP values. |
 | [`fakerouter`](fakerouter) | An in-memory fake of the router's API for tests, with the router's error codes and login limit. |
 
@@ -95,6 +95,9 @@ These are behaviours of the router itself, found while building drctl and the pr
 - **Connected devices** (`ListActiveClients`) and recently seen ones
   (`ListOfflineClients`) carry the live details: connection, signal, traffic, uptime.
   Traffic is counted from the network's side: `TxBytes` is what the device downloaded.
+- **Status** (`GetStatus`) combines `stat/health`, `stat/sysinfo` and the router's entry
+  in `stat/device`. Some numbers come as strings (CPU `"13.9"`), others as numbers, and
+  the access point and switch counts include the router's built-in Wi-Fi and switch.
 - **Notes**: clearing a note (`note: ""`) works, but the router keeps `noted` set.
 - **Propagation.** Changes reach the router's DNS and DHCP server (dnsmasq) about
   10–20 seconds after the API call returns.
