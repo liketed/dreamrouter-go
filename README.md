@@ -16,8 +16,8 @@ go get github.com/liketed/dreamrouter-go
 
 | Package | Contents |
 |---|---|
-| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
-| [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, and network boot / TFTP values. |
+| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
+| [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, network boot / TFTP values, and port forwards (including the conflicts the router doesn't check). |
 | [`fakerouter`](fakerouter) | An in-memory fake of the router's API for tests, with the router's error codes and login limit. |
 
 ## Example
@@ -95,6 +95,11 @@ These are behaviours of the router itself, found while building drctl and the pr
 - **Connected devices** (`ListActiveClients`) and recently seen ones
   (`ListOfflineClients`) carry the live details: connection, signal, traffic, uptime.
   Traffic is counted from the network's side: `TxBytes` is what the device downloaded.
+- **Port forwarding** (`rest/portforward`): the router accepts duplicate ports, reversed
+  ranges, forwards to addresses outside the LANs or to the router itself, and WAN
+  interfaces that don't exist. It stores a rule without an enabled setting if `enabled`
+  is left out, and only translates a single port: a range or list must be forwarded to
+  the same ports. Use `check.PortForward` before writing.
 - **Status** (`GetStatus`) combines `stat/health`, `stat/sysinfo` and the router's entry
   in `stat/device`. Some numbers come as strings (CPU `"13.9"`), others as numbers, and
   the access point and switch counts include the router's built-in Wi-Fi and switch.

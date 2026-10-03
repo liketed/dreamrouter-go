@@ -505,3 +505,46 @@ func TestGetStatus(t *testing.T) {
 		t.Fatalf("latency as a string: %d", s.Internet.LatencyMs)
 	}
 }
+
+func TestPortForwards(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+
+	list, err := c.ListPortForwards(ctx)
+	if err != nil || list == nil || len(list) != 0 {
+		t.Fatalf("ListPortForwards = %v, %v", list, err)
+	}
+	pf := unifi.PortForward{Name: "web", Enabled: false, Interface: "wan", Source: "any", Port: "8443",
+		ForwardIP: "192.168.1.20", ForwardPort: "443", Protocol: "tcp"}
+	got, err := c.CreatePortForward(ctx, pf)
+	if err != nil || got.ID == "" || got.Name != "web" || got.ForwardPort != "443" || got.Enabled {
+		t.Fatalf("CreatePortForward = %+v, %v", got, err)
+	}
+	// enabled is always sent, even when false.
+	if stored := r.PortForwards()[0]; stored["enabled"] != false {
+		t.Fatalf("enabled not sent: %v", stored)
+	}
+	pf.Enabled, pf.ForwardPort = true, "8443"
+	upd, err := c.UpdatePortForward(ctx, got.ID, pf)
+	if err != nil || !upd.Enabled || upd.ForwardPort != "8443" || upd.ID != got.ID {
+		t.Fatalf("UpdatePortForward = %+v, %v", upd, err)
+	}
+	// The router's own rejections come back as API errors.
+	bad := pf
+	bad.Name, bad.Port, bad.ForwardPort = "bad", "40100-40110", "40100-40105"
+	if _, err := c.CreatePortForward(ctx, bad); !unifi.HasCode(err, unifi.CodePortRangeSizeMismatch) ||
+		!strings.Contains(err.Error(), "same size") {
+		t.Fatalf("range size mismatch: %v", err)
+	}
+	if err := c.DeletePortForward(ctx, got.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeletePortForward(ctx, got.ID); !unifi.IsNotFound(err) {
+		t.Fatalf("deleting a deleted rule: %v (want IsNotFound)", err)
+	}
+	if list, _ := c.ListPortForwards(ctx); len(list) != 0 {
+		t.Fatalf("left: %+v", list)
+	}
+}

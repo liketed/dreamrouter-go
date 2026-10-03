@@ -56,6 +56,8 @@ const (
 	CodeInvalidFixedIP            = "api.err.InvalidFixedIP"
 	CodeMACUsed                   = "api.err.MacUsed"
 	CodeDeviceNameRequiresFixedIP = "api.err.LocalDnsRecordRequiresFixedIp"
+	CodeIDInvalid                 = "api.err.IdInvalid"
+	CodePortRangeSizeMismatch     = "api.err.IncorrectMultiportFwdPort"
 	CodeLoginLimitReached         = "AUTHENTICATION_FAILED_LIMIT_REACHED"
 	CodeInvalidUsernameOrPassword = "AUTHENTICATION_FAILED_INVALID_CREDENTIALS"
 )
@@ -89,9 +91,10 @@ func HasCode(err error, code string) bool {
 }
 
 // IsNotFound reports whether err means the requested item doesn't exist.
+// The classic API reports an unknown ID as api.err.IdInvalid.
 func IsNotFound(err error) bool {
 	var apiErr *APIError
-	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
+	return errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Code == CodeIDInvalid)
 }
 
 // Client is safe for concurrent use. It logs in on first use and again if
@@ -338,8 +341,10 @@ func describeCode(code string) string {
 		return "a device's DNS name requires a fixed IP address"
 	case "api.err.InvalidPayload":
 		return "the router rejected the request as invalid"
-	case "api.err.NotFound":
+	case "api.err.NotFound", CodeIDInvalid:
 		return "not found"
+	case CodePortRangeSizeMismatch:
+		return "the port and forward port ranges must be the same size"
 	}
 	return code
 }

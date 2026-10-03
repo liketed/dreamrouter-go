@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -102,6 +103,191 @@ type Router struct {
 	active    []Status
 	offline   []Status
 	stat      Stat
+	forwards  []map[string]any
+}
+
+// PortForwards returns the stored port forwarding rules, as raw JSON objects.
+func (r *Router) PortForwards() []map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]map[string]any, len(r.forwards))
+	for i, f := range r.forwards {
+		c := map[string]any{}
+		for k, v := range f {
+			c[k] = v
+		}
+		out[i] = c
+	}
+	return out
+}
+
+// PutPortForward stores a rule as given (no validation) and returns its ID.
+func (r *Router) PutPortForward(f map[string]any) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id := r.id()
+	c := map[string]any{"_id": id}
+	for k, v := range f {
+		c[k] = v
+	}
+	r.forwards = append(r.forwards, c)
+	return id
+}
+
+// ModifyPortForward changes a stored rule, as an edit in the web UI would.
+func (r *Router) ModifyPortForward(id string, fn func(map[string]any)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, f := range r.forwards {
+		if f["_id"] == id {
+			fn(f)
+		}
+	}
+}
+
+// RemovePortForward deletes a stored rule, as the web UI would.
+func (r *Router) RemovePortForward(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, f := range r.forwards {
+		if f["_id"] == id {
+			r.forwards = append(r.forwards[:i], r.forwards[i+1:]...)
+			return
+		}
+	}
+}
+
+// pfPortCount checks a port field as the router does (numbers 1–65535,
+// ranges in either order, lists) and returns how many ports it covers.
+func pfPortCount(v any) (int, bool) {
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return 0, false
+	}
+	n := 0
+	for _, item := range strings.Split(s, ",") {
+		lo, hi, isRange := strings.Cut(item, "-")
+		a, errA := strconv.Atoi(lo)
+		b := a
+		var errB error
+		if isRange {
+			b, errB = strconv.Atoi(hi)
+		}
+		if errA != nil || errB != nil || a < 1 || a > 65535 || b < 1 || b > 65535 {
+			return 0, false
+		}
+		if b < a {
+			a, b = b, a
+		}
+		n += b - a + 1
+	}
+	return n, true
+}
+
+// pfInvalid mirrors the router's own checks on a port forwarding rule,
+// including that only a single port can be forwarded to a different one. Like
+// the router, it accepts duplicates, reversed ranges, addresses outside the
+// LANs or of the router, unknown WAN interfaces and a missing enabled field.
+func pfInvalid(f map[string]any) string {
+	name, _ := f["name"].(string)
+	if name == "" {
+		return "api.err.InvalidPayload"
+	}
+	n, ok := pfPortCount(f["dst_port"])
+	if !ok {
+		return "api.err.InvalidPayload"
+	}
+	if fp, present := f["fwd_port"]; present && fp != "" {
+		m, ok := pfPortCount(fp)
+		if !ok {
+			return "api.err.InvalidPayload"
+		}
+		// Only a single port can be translated; ranges and lists must be
+		// forwarded to the same ports.
+		if m != n || (n > 1 && fp != f["dst_port"]) {
+			return "api.err.IncorrectMultiportFwdPort"
+		}
+	}
+	if ip, _ := f["fwd"].(string); net.ParseIP(ip) == nil || net.ParseIP(ip).To4() == nil {
+		return "api.err.InvalidPayload"
+	}
+	switch f["proto"] {
+	case "tcp", "udp", "tcp_udp":
+	default:
+		return "api.err.InvalidPayload"
+	}
+	if src, ok := f["src"].(string); ok && src != "any" {
+		if net.ParseIP(src) == nil {
+			if _, _, err := net.ParseCIDR(src); err != nil {
+				return "api.err.InvalidPayload"
+			}
+		}
+	}
+	return ""
+}
+
+func (r *Router) portForwards(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	id := strings.TrimPrefix(strings.TrimPrefix(req.URL.Path, "/proxy/network/api/s/default/rest/portforward"), "/")
+	find := func() int {
+		for i, f := range r.forwards {
+			if f["_id"] == id {
+				return i
+			}
+		}
+		return -1
+	}
+	var body map[string]any
+	if req.Method == http.MethodPost || req.Method == http.MethodPut {
+		_ = json.NewDecoder(req.Body).Decode(&body)
+	}
+	switch {
+	case req.Method == http.MethodGet && id == "":
+		classicOK(w, r.forwards)
+	case req.Method == http.MethodPost && id == "":
+		if code := pfInvalid(body); code != "" {
+			classicErr(w, http.StatusBadRequest, code)
+			return
+		}
+		body["_id"] = r.id()
+		delete(body, "site_id")
+		r.forwards = append(r.forwards, body)
+		classicOK(w, []map[string]any{body})
+	case req.Method == http.MethodPut && id != "":
+		i := find()
+		if i < 0 {
+			classicErr(w, http.StatusBadRequest, "api.err.IdInvalid")
+			return
+		}
+		merged := map[string]any{}
+		for k, v := range r.forwards[i] {
+			merged[k] = v
+		}
+		for k, v := range body {
+			merged[k] = v
+		}
+		merged["_id"] = id
+		if code := pfInvalid(merged); code != "" {
+			classicErr(w, http.StatusBadRequest, code)
+			return
+		}
+		r.forwards[i] = merged
+		classicOK(w, []map[string]any{merged})
+	case req.Method == http.MethodDelete && id != "":
+		i := find()
+		if i < 0 {
+			classicErr(w, http.StatusBadRequest, "api.err.IdInvalid")
+			return
+		}
+		r.forwards = append(r.forwards[:i], r.forwards[i+1:]...)
+		classicOK(w, []any{})
+	default:
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidRequest")
+	}
 }
 
 // Stat is what the router reports for stat/health, stat/sysinfo and
@@ -278,6 +464,8 @@ func New() *Router {
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user", r.userCollection)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user/", r.userItem)
 	mux.HandleFunc("/proxy/network/api/s/default/cmd/stamgr", r.stamgr)
+	mux.HandleFunc("/proxy/network/api/s/default/rest/portforward", r.portForwards)
+	mux.HandleFunc("/proxy/network/api/s/default/rest/portforward/", r.portForwards)
 	mux.HandleFunc("/proxy/network/api/s/default/stat/health", r.statHandler(func() any { return r.stat.Health }))
 	mux.HandleFunc("/proxy/network/api/s/default/stat/sysinfo", r.statHandler(func() any { return []map[string]any{r.stat.Sysinfo} }))
 	mux.HandleFunc("/proxy/network/api/s/default/stat/device", r.statHandler(func() any { return r.stat.Devices }))
