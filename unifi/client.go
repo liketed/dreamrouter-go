@@ -58,6 +58,7 @@ const (
 	CodeDeviceNameRequiresFixedIP = "api.err.LocalDnsRecordRequiresFixedIp"
 	CodeIDInvalid                 = "api.err.IdInvalid"
 	CodePortRangeSizeMismatch     = "api.err.IncorrectMultiportFwdPort"
+	CodeInvalidBackup             = "api.err.InvalidBackup"
 	CodeLoginLimitReached         = "AUTHENTICATION_FAILED_LIMIT_REACHED"
 	CodeInvalidUsernameOrPassword = "AUTHENTICATION_FAILED_INVALID_CREDENTIALS"
 )
@@ -258,22 +259,37 @@ func (c *Client) loginLocked(ctx context.Context) error {
 	}
 }
 
-// send performs one HTTP request. The caller holds mu.
+// rawBody is a request body sent as is (e.g. a multipart upload) instead of as JSON.
+type rawBody struct {
+	data        []byte
+	contentType string
+}
+
+// send performs one HTTP request. The caller holds mu. body is sent as JSON
+// unless it is a rawBody; out receives the decoded JSON response, or the raw
+// bytes if it is a *[]byte.
 func (c *Client) send(ctx context.Context, method, url string, body, out any) error {
 	var reader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
+	contentType := "application/json"
+	switch b := body.(type) {
+	case nil:
+	case rawBody:
+		reader, contentType = bytes.NewReader(b.data), b.contentType
+	default:
+		data, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		reader = bytes.NewReader(b)
+		reader = bytes.NewReader(data)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", contentType)
+	if _, rawOut := out.(*[]byte); !rawOut {
+		req.Header.Set("Accept", "application/json")
+	}
 	if c.csrf != "" {
 		req.Header.Set("X-CSRF-Token", c.csrf)
 	}
@@ -294,6 +310,10 @@ func (c *Client) send(ctx context.Context, method, url string, body, out any) er
 	path := strings.TrimPrefix(strings.TrimPrefix(url, c.network), c.base)
 	if resp.StatusCode >= 400 {
 		return parseError(method, path, resp.StatusCode, raw)
+	}
+	if p, ok := out.(*[]byte); ok {
+		*p = raw
+		return nil
 	}
 	if out != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {
@@ -343,6 +363,8 @@ func describeCode(code string) string {
 		return "the router rejected the request as invalid"
 	case "api.err.NotFound", CodeIDInvalid:
 		return "not found"
+	case CodeInvalidBackup:
+		return "the file is not a valid backup of the Network application"
 	case CodePortRangeSizeMismatch:
 		return "the port and forward port ranges must be the same size"
 	}

@@ -16,7 +16,7 @@ go get github.com/liketed/dreamrouter-go
 
 | Package | Contents |
 |---|---|
-| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
+| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, backups and restores (with the automatic backup schedule), the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
 | [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, network boot / TFTP values, and port forwards (including the conflicts the router doesn't check). |
 | [`fakerouter`](fakerouter) | An in-memory fake of the router's API for tests, with the router's error codes and login limit. |
 
@@ -100,6 +100,18 @@ These are behaviours of the router itself, found while building drctl and the pr
   interfaces that don't exist. It stores a rule without an enabled setting if `enabled`
   is left out, and only translates a single port: a range or list must be forwarded to
   the same ports. Use `check.PortForward` before writing.
+- **Backups.** `DownloadBackup` makes a fresh backup (`cmd/backup` `backup`, then
+  `/dl/backup/<version>.unf`); automatic ones are listed with `list-backups` and
+  downloaded from `/dl/autobackup/<file>`. The files are encrypted `.unf` archives of
+  all the Network application's settings, including password hashes and Wi-Fi keys.
+- **Restores take two steps.** `UploadBackup` posts the file to `/upload/backup`; the
+  router checks it (`api.err.InvalidBackup` otherwise) and returns a `backup_id` with
+  the backup's version and sites, without changing anything. `RestoreBackup` then sends
+  `cmd/backup` `restore` with that ID. The Network application restarts and its API is
+  unavailable for about a minute; routing and connected devices carry on. (An unknown
+  `backup_id` makes the router fail with HTTP 500.)
+- **Console backups** (`/api/backup/...`, all apps and UniFi OS users) need the console
+  owner's account; a local admin gets `ACTION_FORBIDDEN`.
 - **Status** (`GetStatus`) combines `stat/health`, `stat/sysinfo` and the router's entry
   in `stat/device`. Some numbers come as strings (CPU `"13.9"`), others as numbers, and
   the access point and switch counts include the router's built-in Wi-Fi and switch.

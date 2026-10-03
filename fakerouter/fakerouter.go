@@ -10,8 +10,10 @@
 package fakerouter
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -104,6 +107,214 @@ type Router struct {
 	offline   []Status
 	stat      Stat
 	forwards  []map[string]any
+
+	autoBackups []AutoBackup
+	staged      map[string][]byte // uploaded backups by backup_id
+	schedule    map[string]any    // the super_mgmt setting
+	restores    int
+}
+
+// AutoBackup is one of the router's automatic backups.
+type AutoBackup struct {
+	Filename string
+	Version  string
+	Time     time.Time
+	Data     []byte
+}
+
+// fakeBackupMagic starts the fake router's backups: a JSON snapshot of its
+// DNS records, clients, networks and port forwards. Real backups are
+// encrypted .unf files the fake doesn't read.
+const fakeBackupMagic = "FAKEUNF\n"
+
+// FakeVersion is the Network application version the fake reports in backups.
+const FakeVersion = "10.6.106"
+
+type backupState struct {
+	DNS      []DNSRecord      `json:"dns"`
+	Clients  []Client         `json:"clients"`
+	Networks []map[string]any `json:"networks"`
+	Forwards []map[string]any `json:"forwards"`
+}
+
+// Backup returns a backup of the current state, as DownloadBackup would.
+func (r *Router) Backup() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.backupLocked()
+}
+
+func (r *Router) backupLocked() []byte {
+	b, _ := json.Marshal(backupState{DNS: r.dns, Clients: r.clients, Networks: r.networks, Forwards: r.forwards})
+	return append([]byte(fakeBackupMagic), b...)
+}
+
+// PutAutoBackup adds an automatic backup.
+func (r *Router) PutAutoBackup(b AutoBackup) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.autoBackups = append(r.autoBackups, b)
+}
+
+// AutoBackups returns the automatic backups.
+func (r *Router) AutoBackups() []AutoBackup {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]AutoBackup(nil), r.autoBackups...)
+}
+
+// Restores counts completed restores.
+func (r *Router) Restores() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.restores
+}
+
+// BackupSchedule returns the stored super_mgmt setting.
+func (r *Router) BackupSchedule() map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := map[string]any{}
+	for k, v := range r.schedule {
+		c[k] = v
+	}
+	return c
+}
+
+func (r *Router) cmdBackup(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	var body struct {
+		Cmd      string `json:"cmd"`
+		Days     int    `json:"days"`
+		Filename string `json:"filename"`
+		BackupID string `json:"backup_id"`
+	}
+	_ = json.NewDecoder(req.Body).Decode(&body)
+	switch body.Cmd {
+	case "list-backups":
+		out := []map[string]any{}
+		for _, b := range r.autoBackups {
+			out = append(out, map[string]any{"filename": b.Filename, "version": b.Version, "time": b.Time.UnixMilli(),
+				"size": len(b.Data), "type": "primary", "keep_forever": false})
+		}
+		classicOK(w, out)
+	case "backup":
+		classicOK(w, []map[string]any{{"url": "/dl/backup/" + FakeVersion + ".unf"}})
+	case "delete-backup":
+		for i, b := range r.autoBackups {
+			if b.Filename == body.Filename {
+				r.autoBackups = append(r.autoBackups[:i], r.autoBackups[i+1:]...)
+				classicOK(w, []any{})
+				return
+			}
+		}
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidBackup")
+	case "restore":
+		data, ok := r.staged[body.BackupID]
+		if !ok {
+			// The real router fails with an internal error for an unknown ID.
+			http.Error(w, "HTTP Status 500 – Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		var st backupState
+		_ = json.Unmarshal(data[len(fakeBackupMagic):], &st)
+		r.dns, r.clients, r.networks, r.forwards = st.DNS, st.Clients, st.Networks, st.Forwards
+		delete(r.staged, body.BackupID)
+		r.restores++
+		// The restart ends every session.
+		r.sessions = map[string]bool{}
+		classicOK(w, []any{})
+	default:
+		classicErr(w, http.StatusNotFound, "api.err.NotFound")
+	}
+}
+
+func (r *Router) downloadBackup(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	var data []byte
+	switch {
+	case strings.HasPrefix(req.URL.Path, "/proxy/network/dl/backup/"):
+		data = r.backupLocked()
+	case strings.HasPrefix(req.URL.Path, "/proxy/network/dl/autobackup/"):
+		name := strings.TrimPrefix(req.URL.Path, "/proxy/network/dl/autobackup/")
+		for _, b := range r.autoBackups {
+			if b.Filename == name {
+				data = b.Data
+			}
+		}
+	}
+	if data == nil {
+		http.NotFound(w, req)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	_, _ = w.Write(data)
+}
+
+func (r *Router) uploadBackup(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	if err := req.ParseMultipartForm(32 << 20); err != nil {
+		classicErr(w, http.StatusBadRequest, "the request doesn't contain a multipart/form-data or multipart/mixed stream")
+		return
+	}
+	var data []byte
+	var name string
+	for _, files := range req.MultipartForm.File {
+		for _, fh := range files {
+			f, err := fh.Open()
+			if err == nil {
+				data, _ = io.ReadAll(f)
+				f.Close()
+				name = fh.Filename
+			}
+		}
+	}
+	if !bytes.HasPrefix(data, []byte(fakeBackupMagic)) || !json.Valid(data[len(fakeBackupMagic):]) {
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidBackup")
+		return
+	}
+	if r.staged == nil {
+		r.staged = map[string][]byte{}
+	}
+	id := fmt.Sprintf("00000000-0000-4000-8000-%012d", r.nextID+1)
+	r.nextID++
+	r.staged[id] = data
+	classicOK(w, []map[string]any{{"backup_id": id, "version": FakeVersion, "filename": name, "filesize": len(data),
+		"timestamp": "1791055953534", "sites": []map[string]any{{"name": "default", "desc": "Default"}}, "purpose": "application_backup"}})
+}
+
+func (r *Router) settings(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	if req.Method == http.MethodPut {
+		if req.URL.Path != "/proxy/network/api/s/default/rest/setting/super_mgmt/"+r.schedule["_id"].(string) {
+			classicErr(w, http.StatusBadRequest, "api.err.IdInvalid")
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(req.Body).Decode(&body)
+		for k, v := range body {
+			r.schedule[k] = v
+		}
+		classicOK(w, []map[string]any{r.schedule})
+		return
+	}
+	classicOK(w, []map[string]any{r.schedule, {"_id": "set-ntp", "key": "ntp", "setting_preference": "auto"}})
 }
 
 // PortForwards returns the stored port forwarding rules, as raw JSON objects.
@@ -464,6 +675,14 @@ func New() *Router {
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user", r.userCollection)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user/", r.userItem)
 	mux.HandleFunc("/proxy/network/api/s/default/cmd/stamgr", r.stamgr)
+	mux.HandleFunc("/proxy/network/api/s/default/cmd/backup", r.cmdBackup)
+	mux.HandleFunc("/proxy/network/dl/backup/", r.downloadBackup)
+	mux.HandleFunc("/proxy/network/dl/autobackup/", r.downloadBackup)
+	mux.HandleFunc("/proxy/network/upload/backup", r.uploadBackup)
+	mux.HandleFunc("/proxy/network/api/s/default/rest/setting", r.settings)
+	mux.HandleFunc("/proxy/network/api/s/default/rest/setting/", r.settings)
+	r.schedule = map[string]any{"_id": "set-super-mgmt", "key": "super_mgmt", "autobackup_enabled": true,
+		"autobackup_cron_expr": "30 0 1 * *", "autobackup_timezone": "Europe/Dublin", "autobackup_days": 0}
 	mux.HandleFunc("/proxy/network/api/s/default/rest/portforward", r.portForwards)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/portforward/", r.portForwards)
 	mux.HandleFunc("/proxy/network/api/s/default/stat/health", r.statHandler(func() any { return r.stat.Health }))

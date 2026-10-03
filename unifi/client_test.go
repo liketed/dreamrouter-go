@@ -548,3 +548,67 @@ func TestPortForwards(t *testing.T) {
 		t.Fatalf("left: %+v", list)
 	}
 }
+
+func TestBackups(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+	t1 := time.Date(2026, 8, 31, 23, 30, 0, 0, time.UTC)
+	t2 := time.Date(2026, 9, 30, 23, 30, 0, 0, time.UTC)
+	r.PutAutoBackup(fakerouter.AutoBackup{Filename: "autobackup_10.6.106_20260930.unf", Version: "10.6.106", Time: t2, Data: []byte("sept")})
+	r.PutAutoBackup(fakerouter.AutoBackup{Filename: "autobackup_10.6.101_20260831.unf", Version: "10.6.101", Time: t1, Data: []byte("august")})
+
+	list, err := c.ListBackups(ctx)
+	if err != nil || len(list) != 2 || !list[0].Time.Equal(t1) || list[1].Filename != "autobackup_10.6.106_20260930.unf" || list[1].Size != 4 {
+		t.Fatalf("ListBackups (oldest first) = %+v, %v", list, err)
+	}
+	if data, err := c.DownloadAutoBackup(ctx, list[0].Filename); err != nil || string(data) != "august" {
+		t.Fatalf("DownloadAutoBackup = %q, %v", data, err)
+	}
+	for _, bad := range []string{"../x.unf", "a/b.unf", "x.txt", ""} {
+		if _, err := c.DownloadAutoBackup(ctx, bad); err == nil {
+			t.Errorf("DownloadAutoBackup(%q) accepted", bad)
+		}
+	}
+	if err := c.DeleteAutoBackup(ctx, list[0].Filename); err != nil || len(r.AutoBackups()) != 1 {
+		t.Fatalf("DeleteAutoBackup: %v, left %d", err, len(r.AutoBackups()))
+	}
+
+	sched, err := c.GetBackupSchedule(ctx)
+	if err != nil || !sched.Enabled || sched.Cron != "30 0 1 * *" || sched.Timezone != "Europe/Dublin" {
+		t.Fatalf("GetBackupSchedule = %+v, %v", sched, err)
+	}
+	got, err := c.SetBackupSchedule(ctx, unifi.BackupSchedule{Enabled: true, Cron: "0 3 * * 1"})
+	if err != nil || got.Cron != "0 3 * * 1" || got.Timezone != "Europe/Dublin" {
+		t.Fatalf("SetBackupSchedule (keeps time zone) = %+v, %v", got, err)
+	}
+
+	// Back up, change something, restore, and the change is gone.
+	backup, err := c.DownloadBackup(ctx, 0)
+	if err != nil || len(backup) == 0 {
+		t.Fatalf("DownloadBackup: %v", err)
+	}
+	r.PutDNS(fakerouter.DNSRecord{RecordType: "A", Key: "restore-test.home.internal", Value: "192.168.1.250", Enabled: true})
+	staged, err := c.UploadBackup(ctx, backup, "before.unf")
+	if err != nil || staged.ID == "" || staged.Version != fakerouter.FakeVersion || staged.Filename != "before.unf" ||
+		len(staged.Sites) != 1 || staged.Sites[0] != "default" || staged.Time.IsZero() {
+		t.Fatalf("UploadBackup = %+v, %v", staged, err)
+	}
+	if r.Restores() != 0 || len(r.DNS()) != 1 {
+		t.Fatal("uploading restored already")
+	}
+	if err := c.RestoreBackup(ctx, staged.ID); err != nil {
+		t.Fatal(err)
+	}
+	if r.Restores() != 1 || len(r.DNS()) != 0 {
+		t.Fatalf("restore didn't revert the change: %v", r.DNS())
+	}
+	// The restart ended the session; the client logs in again.
+	if _, err := c.ListDNS(ctx); err != nil {
+		t.Fatalf("after restore: %v", err)
+	}
+	if _, err := c.UploadBackup(ctx, []byte("not a backup"), "x.unf"); !unifi.HasCode(err, unifi.CodeInvalidBackup) {
+		t.Fatalf("junk upload: %v", err)
+	}
+}
