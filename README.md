@@ -1,8 +1,8 @@
 # dreamrouter-go
 
 Go packages for managing a UniFi Dream Router 7 (or other UniFi OS gateway): static
-DNS records, DHCP reservations, device DNS names and network DHCP settings (network
-boot, TFTP server), through the UniFi Network application's API.
+DNS records, DHCP reservations, device DNS names, clients (connected devices, names,
+notes, blocking) and network DHCP settings (network boot, TFTP server), through the UniFi Network application's API.
 
 It is the shared code behind:
 
@@ -16,7 +16,7 @@ go get github.com/liketed/dreamrouter-go
 
 | Package | Contents |
 |---|---|
-| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations and device DNS names), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
+| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
 | [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, and network boot / TFTP values. |
 | [`fakerouter`](fakerouter) | An in-memory fake of the router's API for tests, with the router's error codes and login limit. |
 
@@ -89,6 +89,13 @@ These are behaviours of the router itself, found while building drctl and the pr
   file once one is stored, and it accepts commas, spaces and host names that would break
   the dnsmasq line, so validate with `check.Boot` and `check.TFTPServer`. There are no
   per-device boot settings: reservations only hold a MAC address and IP.
+- **Blocking** (`BlockClient`) accepts any value: an unknown MAC address, or something
+  that isn't a MAC address at all, returns success and creates a new, blocked client
+  entry. Validate with `check.MAC` and check the device exists first.
+- **Connected devices** (`ListActiveClients`) and recently seen ones
+  (`ListOfflineClients`) carry the live details: connection, signal, traffic, uptime.
+  Traffic is counted from the network's side: `TxBytes` is what the device downloaded.
+- **Notes**: clearing a note (`note: ""`) works, but the router keeps `noted` set.
 - **Propagation.** Changes reach the router's DNS and DHCP server (dnsmasq) about
   10–20 seconds after the API call returns.
 - This is the Network application's internal, undocumented API, the one its web UI

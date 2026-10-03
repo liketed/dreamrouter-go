@@ -377,3 +377,68 @@ func TestListLeases(t *testing.T) {
 		t.Fatal("unknown expiry should be the zero time")
 	}
 }
+
+func TestClientStatusAndBlocking(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+	r.PutClient(fakerouter.Client{MAC: "aa:bb:cc:00:00:44", Name: "speaker"})
+	r.PutActive(fakerouter.Status{MAC: "aa:bb:cc:00:00:44", IP: "192.168.1.44", DisplayName: "Speaker 00:44", Type: "WIRELESS",
+		ESSID: "home", Radio: "na", Signal: -61, TxBytes: 2e9, RxBytes: 1e8, Uptime: 3600})
+	r.PutOffline(fakerouter.Status{MAC: "aa:bb:cc:00:00:88", LastIP: "192.168.1.88", Hostname: "old-laptop", Type: "WIRED", LastSeen: 1791013530})
+
+	active, err := c.ListActiveClients(ctx)
+	if err != nil || len(active) != 1 || active[0].Label() != "Speaker" || active[0].Address() != "192.168.1.44" || active[0].Signal != -61 || active[0].Status != "online" {
+		t.Fatalf("ListActiveClients = %+v, %v", active, err)
+	}
+	offline, err := c.ListOfflineClients(ctx, 168)
+	if err != nil || len(offline) != 1 || offline[0].Address() != "192.168.1.88" || offline[0].Label() != "old-laptop" || offline[0].Status != "offline" {
+		t.Fatalf("ListOfflineClients = %+v, %v", offline, err)
+	}
+
+	for _, tc := range []struct{ display, host, want string }{
+		{"Speaker 00:44", "", "Speaker"},
+		{"aa:bb:cc:00:00:44", "speaker-host", "speaker-host"},
+		{"aa:bb:cc:00:00:44", "", ""},
+		{"", "speaker-host", "speaker-host"},
+	} {
+		if got := (unifi.ClientStatus{MAC: "aa:bb:cc:00:00:44", DisplayName: tc.display, Hostname: tc.host}).Label(); got != tc.want {
+			t.Errorf("Label(%q, %q) = %q, want %q", tc.display, tc.host, got, tc.want)
+		}
+	}
+
+	if err := c.BlockClient(ctx, "aa:bb:cc:00:00:44"); err != nil {
+		t.Fatal(err)
+	}
+	if active, _ := c.ListActiveClients(ctx); !active[0].Blocked {
+		t.Fatal("block not reflected in the active list")
+	}
+	if err := c.UnblockClient(ctx, "aa:bb:cc:00:00:44"); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := r.Client("aa:bb:cc:00:00:44"); d.Blocked {
+		t.Fatal("still blocked after unblock")
+	}
+	// Like the real router, the fake accepts a block for any value.
+	if err := c.BlockClient(ctx, "nope"); err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := r.Client("nope"); !ok || !d.Blocked {
+		t.Fatal("fake router should create a blocked entry for an unknown MAC, as the real one does")
+	}
+
+	clients, _ := c.ListClients(ctx)
+	var speaker unifi.ClientDevice
+	for _, d := range clients {
+		if d.MAC == "aa:bb:cc:00:00:44" {
+			speaker = d
+		}
+	}
+	if _, err := c.UpdateClient(ctx, speaker.ID, map[string]any{"note": "on the shelf", "noted": true}); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := r.Client("aa:bb:cc:00:00:44"); d.Note != "on the shelf" {
+		t.Fatalf("note: %+v", d)
+	}
+}

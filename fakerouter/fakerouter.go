@@ -49,6 +49,41 @@ type Client struct {
 	LocalDNSRecord        string `json:"local_dns_record,omitempty"`
 	LocalDNSRecordEnabled bool   `json:"local_dns_record_enabled"`
 	LastIP                string `json:"last_ip,omitempty"`
+	Note                  string `json:"note,omitempty"`
+	Noted                 bool   `json:"noted,omitempty"`
+	Blocked               bool   `json:"blocked,omitempty"`
+}
+
+// Status is a connected or recently seen device, as listed by clients/active
+// and clients/history.
+type Status struct {
+	MAC           string  `json:"mac"`
+	IP            string  `json:"ip,omitempty"`
+	LastIP        string  `json:"last_ip,omitempty"`
+	DisplayName   string  `json:"display_name,omitempty"`
+	Hostname      string  `json:"hostname,omitempty"`
+	OUI           string  `json:"oui,omitempty"`
+	ModelName     string  `json:"model_name,omitempty"`
+	Status        string  `json:"status"`
+	Type          string  `json:"type"`
+	IsWired       bool    `json:"is_wired"`
+	Blocked       bool    `json:"blocked"`
+	UseFixedIP    bool    `json:"use_fixedip"`
+	NetworkID     string  `json:"network_id,omitempty"`
+	NetworkName   string  `json:"network_name,omitempty"`
+	UplinkName    string  `json:"last_uplink_name,omitempty"`
+	SwitchPort    float64 `json:"sw_port,omitempty"`
+	WiredRateMbps float64 `json:"wired_rate_mbps,omitempty"`
+	ESSID         string  `json:"essid,omitempty"`
+	Radio         string  `json:"radio,omitempty"`
+	RadioProto    string  `json:"radio_proto,omitempty"`
+	Channel       float64 `json:"channel,omitempty"`
+	Signal        float64 `json:"signal,omitempty"`
+	TxBytes       float64 `json:"tx_bytes,omitempty"`
+	RxBytes       float64 `json:"rx_bytes,omitempty"`
+	Uptime        float64 `json:"uptime,omitempty"`
+	FirstSeen     float64 `json:"first_seen,omitempty"`
+	LastSeen      float64 `json:"last_seen,omitempty"`
 }
 
 type Router struct {
@@ -64,6 +99,57 @@ type Router struct {
 	listCalls int
 	networks  []map[string]any
 	leases    []Lease
+	active    []Status
+	offline   []Status
+}
+
+// PutActive adds a connected device to clients/active.
+func (r *Router) PutActive(s Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s.Status = "online"
+	r.active = append(r.active, s)
+}
+
+// PutOffline adds a recently seen, now offline device to clients/history.
+func (r *Router) PutOffline(s Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s.Status = "offline"
+	r.offline = append(r.offline, s)
+}
+
+// statusList returns the list with each device's blocked and reservation
+// state from its client record, as the real router reports them.
+func (r *Router) statusList(list []Status) []Status {
+	out := make([]Status, 0, len(list))
+	for _, s := range list {
+		for _, c := range r.clients {
+			if c.MAC == s.MAC {
+				s.Blocked, s.UseFixedIP = c.Blocked, c.UseFixedIP
+			}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func (r *Router) clientsActive(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	writeJSON(w, http.StatusOK, r.statusList(r.active))
+}
+
+func (r *Router) clientsHistory(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	writeJSON(w, http.StatusOK, r.statusList(r.offline))
 }
 
 // Lease is a DHCP lease, as listed by active-leases.
@@ -128,6 +214,8 @@ func New() *Router {
 	mux.HandleFunc("/proxy/network/v2/api/site/default/static-dns", r.dnsCollection)
 	mux.HandleFunc("/proxy/network/v2/api/site/default/static-dns/", r.dnsItem)
 	mux.HandleFunc("/proxy/network/v2/api/site/default/active-leases", r.activeLeases)
+	mux.HandleFunc("/proxy/network/v2/api/site/default/clients/active", r.clientsActive)
+	mux.HandleFunc("/proxy/network/v2/api/site/default/clients/history", r.clientsHistory)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/networkconf", r.networkCollection)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/networkconf/", r.networkItem)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/user", r.userCollection)
@@ -598,6 +686,12 @@ func (r *Router) applyFields(w http.ResponseWriter, c *Client, f map[string]any)
 	if v, ok := f["local_dns_record_enabled"].(bool); ok {
 		c.LocalDNSRecordEnabled = v
 	}
+	if v, ok := f["note"].(string); ok {
+		c.Note = v
+	}
+	if v, ok := f["noted"].(bool); ok && v {
+		c.Noted = true // the real router keeps "noted" set once a note was added
+	}
 	if c.UseFixedIP {
 		_, subnet, _ := net.ParseCIDR("192.168.1.0/24")
 		ip := net.ParseIP(c.FixedIP)
@@ -635,10 +729,31 @@ func (r *Router) stamgr(w http.ResponseWriter, req *http.Request) {
 	}
 	var body struct {
 		Cmd  string   `json:"cmd"`
+		MAC  string   `json:"mac"`
 		MACs []string `json:"macs"`
 	}
 	_ = json.NewDecoder(req.Body).Decode(&body)
-	if body.Cmd != "forget-sta" {
+	switch body.Cmd {
+	case "block-sta", "unblock-sta":
+		// The real router accepts any value, creating a client entry for an
+		// unknown (or invalid) MAC address.
+		block := body.Cmd == "block-sta"
+		for i := range r.clients {
+			if r.clients[i].MAC == body.MAC {
+				r.clients[i].Blocked = block
+				classicOK(w, []Client{r.clients[i]})
+				return
+			}
+		}
+		c := Client{ID: r.id(), MAC: body.MAC, Blocked: block}
+		r.clients = append(r.clients, c)
+		classicOK(w, []Client{c})
+		return
+	case "kick-sta":
+		classicErr(w, http.StatusBadRequest, "api.err.UnknownStation")
+		return
+	case "forget-sta":
+	default:
 		classicErr(w, http.StatusBadRequest, "api.err.InvalidCommand")
 		return
 	}

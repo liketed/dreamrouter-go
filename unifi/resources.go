@@ -137,6 +137,11 @@ type ClientDevice struct {
 	LocalDNSRecord        string `json:"local_dns_record,omitempty"`
 	LocalDNSRecordEnabled bool   `json:"local_dns_record_enabled"`
 	LastIP                string `json:"last_ip,omitempty"`
+	Note                  string `json:"note,omitempty"`
+	Blocked               bool   `json:"blocked,omitempty"`
+	OUI                   string `json:"oui,omitempty"`
+	FirstSeen             int64  `json:"first_seen,omitempty"`
+	LastSeen              int64  `json:"last_seen,omitempty"`
 }
 
 // DisplayName is the client's name, falling back to its hostname.
@@ -300,4 +305,105 @@ func (c *Client) ListLeases(ctx context.Context) ([]Lease, error) {
 		out.Info = []Lease{}
 	}
 	return out.Info, nil
+}
+
+// ClientStatus describes a device that is connected now (ListActiveClients)
+// or was seen recently (ListOfflineClients). Times are Unix seconds.
+type ClientStatus struct {
+	MAC         string `json:"mac"`
+	IP          string `json:"ip"`      // current address (connected devices)
+	LastIP      string `json:"last_ip"` // last address (offline devices)
+	DisplayName string `json:"display_name"`
+	Hostname    string `json:"hostname"`
+	OUI         string `json:"oui"`
+	ModelName   string `json:"model_name"`
+	Status      string `json:"status"` // "online" or "offline"
+	Type        string `json:"type"`   // "WIRED" or "WIRELESS"
+	IsWired     bool   `json:"is_wired"`
+	IsGuest     bool   `json:"is_guest"`
+	Blocked     bool   `json:"blocked"`
+	UseFixedIP  bool   `json:"use_fixedip"`
+	NetworkID   string `json:"network_id"`
+	NetworkName string `json:"network_name"`
+
+	// Where it is connected: the access point or switch/router, and for wired
+	// devices the port and link speed.
+	UplinkName    string  `json:"last_uplink_name"`
+	SwitchPort    float64 `json:"sw_port"`
+	WiredRateMbps float64 `json:"wired_rate_mbps"`
+
+	// Wi-Fi details.
+	ESSID          string  `json:"essid"`
+	Radio          string  `json:"radio"`       // band, e.g. "ng" (2.4 GHz), "na" (5 GHz), "6e" (6 GHz)
+	RadioProto     string  `json:"radio_proto"` // Wi-Fi standard, e.g. "ax"
+	Channel        float64 `json:"channel"`
+	Signal         float64 `json:"signal"` // dBm
+	WifiExperience float64 `json:"wifi_experience_score"`
+
+	// Traffic, counted from the network's side: TxBytes were sent to the
+	// device (its downloads), RxBytes received from it (its uploads).
+	TxBytes float64 `json:"tx_bytes"`
+	RxBytes float64 `json:"rx_bytes"`
+
+	Uptime    float64 `json:"uptime"` // seconds connected
+	FirstSeen float64 `json:"first_seen"`
+	LastSeen  float64 `json:"last_seen"`
+}
+
+// Address is the device's current address, or its last one if offline.
+func (s ClientStatus) Address() string {
+	if s.IP != "" {
+		return s.IP
+	}
+	return s.LastIP
+}
+
+// Label is the router's name for the device without the MAC suffix it adds
+// to unnamed devices, else its host name. It is empty when the router only
+// knows the MAC address (which it then uses as the display name).
+func (s ClientStatus) Label() string {
+	d := s.DisplayName
+	if len(s.MAC) == 17 {
+		d = strings.TrimSuffix(d, " "+s.MAC[12:])
+	}
+	if d != "" && !strings.EqualFold(d, s.MAC) {
+		return d
+	}
+	return s.Hostname
+}
+
+// ListActiveClients returns the devices connected now.
+func (c *Client) ListActiveClients(ctx context.Context) ([]ClientStatus, error) {
+	var out []ClientStatus
+	err := c.do(ctx, http.MethodGet, c.v2("/clients/active"), nil, &out)
+	if out == nil && err == nil {
+		out = []ClientStatus{}
+	}
+	return out, err
+}
+
+// ListOfflineClients returns devices that are offline now but were seen
+// within the given number of hours.
+func (c *Client) ListOfflineClients(ctx context.Context, withinHours int) ([]ClientStatus, error) {
+	var out []ClientStatus
+	err := c.do(ctx, http.MethodGet, c.v2(fmt.Sprintf("/clients/history?withinHours=%d", withinHours)), nil, &out)
+	if out == nil && err == nil {
+		out = []ClientStatus{}
+	}
+	return out, err
+}
+
+// BlockClient blocks a device: it is disconnected and can't rejoin until
+// unblocked. The router accepts any value here, even an unknown or invalid
+// MAC address (for which it creates a new client entry), so check the MAC
+// belongs to a known device first.
+func (c *Client) BlockClient(ctx context.Context, mac string) error {
+	var env classicEnvelope
+	return c.write(ctx, http.MethodPost, c.classic("/cmd/stamgr"), map[string]any{"cmd": "block-sta", "mac": mac}, &env)
+}
+
+// UnblockClient lets a blocked device connect again.
+func (c *Client) UnblockClient(ctx context.Context, mac string) error {
+	var env classicEnvelope
+	return c.write(ctx, http.MethodPost, c.classic("/cmd/stamgr"), map[string]any{"cmd": "unblock-sta", "mac": mac}, &env)
 }
