@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -115,6 +116,8 @@ type Router struct {
 	mgmt        map[string]any // the mgmt setting (device SSH)
 	routerSSH   bool
 	mgmtWrites  int
+	wifis       []map[string]any
+	wifiApplies int
 }
 
 // RouterSSH reports whether SSH to the router is on.
@@ -712,7 +715,7 @@ func (r *Router) activeLeases(w http.ResponseWriter, req *http.Request) {
 // New starts a fake router with one network, "Default", 192.168.1.1/24.
 func New() *Router {
 	r := &Router{sessions: map[string]bool{}, networks: []map[string]any{
-		{"_id": NetworkID, "name": "Default", "purpose": "corporate", "ip_subnet": "192.168.1.1/24",
+		{"_id": NetworkID, "name": "Default", "purpose": "corporate", "ip_subnet": "192.168.1.1/24", "attr_no_delete": true,
 			"dhcpd_enabled": true, "dhcpd_start": "192.168.1.6", "dhcpd_stop": "192.168.1.254", "domain_name": "localdomain"},
 		{"_id": "net-wan", "name": "Internet 1", "purpose": "wan"},
 	}}
@@ -738,6 +741,14 @@ func New() *Router {
 	r.mgmt = map[string]any{"_id": "set-mgmt", "key": "mgmt", "x_ssh_enabled": true, "x_ssh_username": "fakeadmin",
 		"x_ssh_password": "fake-password", "x_ssh_auth_password_enabled": true, "x_ssh_bind_wildcard": false, "x_api_token": "token-0"}
 	mux.HandleFunc("/api/system", r.system)
+	mux.HandleFunc("/proxy/network/api/s/default/rest/wlanconf", r.wlanconf)
+	mux.HandleFunc("/proxy/network/api/s/default/rest/wlanconf/", r.wlanconf)
+	mux.HandleFunc("/proxy/network/v2/api/site/default/apgroups", r.staticJSON([]map[string]any{
+		{"_id": "apgroup-default", "attr_hidden_id": "default", "name": "All APs", "for_wlanconf": false}}, false))
+	mux.HandleFunc("/proxy/network/api/s/default/rest/usergroup", r.staticJSON([]map[string]any{
+		{"_id": "usergroup-default", "attr_hidden_id": "Default", "name": "Default"}}, true))
+	r.wifis = []map[string]any{{"_id": "wlan-home", "name": "home", "enabled": true, "hide_ssid": false, "security": "wpapsk",
+		"x_passphrase": "home-password", "networkconf_id": NetworkID, "wlan_bands": []any{"2g", "5g", "6g"}}}
 	r.schedule = map[string]any{"_id": "set-super-mgmt", "key": "super_mgmt", "autobackup_enabled": true,
 		"autobackup_cron_expr": "30 0 1 * *", "autobackup_timezone": "Europe/Dublin", "autobackup_days": 0}
 	mux.HandleFunc("/proxy/network/api/s/default/rest/portforward", r.portForwards)
@@ -1039,7 +1050,162 @@ func (r *Router) networkCollection(w http.ResponseWriter, req *http.Request) {
 	if !r.authorised(w, req) {
 		return
 	}
-	classicOK(w, r.networks)
+	if req.Method != http.MethodPost {
+		classicOK(w, r.networks)
+		return
+	}
+	var n map[string]any
+	if json.NewDecoder(req.Body).Decode(&n) != nil {
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+		return
+	}
+	// The router's own checks on a new network. Like the router, it accepts
+	// duplicate names and public subnets.
+	vlan, _ := n["vlan"].(float64)
+	if vlan < 2 || vlan > 4094 {
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+		return
+	}
+	p, err := netip.ParsePrefix(fmt.Sprint(n["ip_subnet"]))
+	if err != nil || p.Addr() == p.Masked().Addr() {
+		classicErr(w, http.StatusBadRequest, "api.err.IncorrectIPSubnetSpec")
+		return
+	}
+	for _, o := range r.networks {
+		if ov, _ := o["vlan"].(float64); ov == vlan && o["vlan_enabled"] == true {
+			classicErr(w, http.StatusBadRequest, "api.err.VlanUsed")
+			return
+		}
+		if op, err := netip.ParsePrefix(fmt.Sprint(o["ip_subnet"])); err == nil && op.Masked().Overlaps(p.Masked()) {
+			classicErr(w, http.StatusBadRequest, "api.err.SubnetOverlapped")
+			return
+		}
+	}
+	start, err1 := netip.ParseAddr(fmt.Sprint(n["dhcpd_start"]))
+	stop, err2 := netip.ParseAddr(fmt.Sprint(n["dhcpd_stop"]))
+	if err1 != nil || err2 != nil || !p.Masked().Contains(start) || !p.Masked().Contains(stop) || stop.Less(start) {
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidDHCPRange")
+		return
+	}
+	n["_id"] = r.id()
+	r.networks = append(r.networks, n)
+	classicOK(w, []map[string]any{n})
+}
+
+// WiFis returns the stored Wi-Fi networks, as raw JSON objects.
+func (r *Router) WiFis() []map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]map[string]any, len(r.wifis))
+	for i, w := range r.wifis {
+		c := map[string]any{}
+		for k, v := range w {
+			c[k] = v
+		}
+		out[i] = c
+	}
+	return out
+}
+
+// ModifyWiFi changes a stored Wi-Fi network by name, as the web UI would.
+func (r *Router) ModifyWiFi(name string, fn func(map[string]any)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, w := range r.wifis {
+		if w["name"] == name {
+			fn(w)
+		}
+	}
+}
+
+// WiFiApplies counts how many times the access points have had to re-apply
+// their settings (each Wi-Fi network created, changed or deleted).
+func (r *Router) WiFiApplies() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.wifiApplies
+}
+
+// wifis serves rest/wlanconf, with the router's own checks: a password of
+// at least 8 characters, a name of at most 32 bytes and an existing
+// network. Like the router, it accepts duplicate names and 64-character
+// passwords that aren't hex.
+func (r *Router) wlanconf(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	id := strings.TrimPrefix(strings.TrimPrefix(req.URL.Path, "/proxy/network/api/s/default/rest/wlanconf"), "/")
+	var body map[string]any
+	if req.Method == http.MethodPost || req.Method == http.MethodPut {
+		_ = json.NewDecoder(req.Body).Decode(&body)
+	}
+	valid := func(wl map[string]any) string {
+		name, _ := wl["name"].(string)
+		pw, _ := wl["x_passphrase"].(string)
+		if name == "" || len(name) > 32 || (wl["security"] == "wpapsk" && len(pw) < 8) {
+			return "api.err.InvalidPayload"
+		}
+		for _, n := range r.networks {
+			if n["_id"] == wl["networkconf_id"] {
+				return ""
+			}
+		}
+		return "api.err.InvalidNetworkConfId"
+	}
+	find := func() int {
+		for i, wl := range r.wifis {
+			if wl["_id"] == id {
+				return i
+			}
+		}
+		return -1
+	}
+	switch {
+	case req.Method == http.MethodGet:
+		classicOK(w, r.wifis)
+	case req.Method == http.MethodPost && id == "":
+		if code := valid(body); code != "" {
+			classicErr(w, http.StatusBadRequest, code)
+			return
+		}
+		body["_id"] = r.id()
+		r.wifis = append(r.wifis, body)
+		r.wifiApplies++
+		classicOK(w, []map[string]any{body})
+	case req.Method == http.MethodPut:
+		i := find()
+		if i < 0 {
+			classicErr(w, http.StatusBadRequest, "api.err.IdInvalid")
+			return
+		}
+		merged := map[string]any{}
+		for k, v := range r.wifis[i] {
+			merged[k] = v
+		}
+		for k, v := range body {
+			merged[k] = v
+		}
+		if code := valid(merged); code != "" {
+			classicErr(w, http.StatusBadRequest, code)
+			return
+		}
+		r.wifis[i] = merged
+		r.wifiApplies++
+		classicOK(w, []map[string]any{merged})
+	case req.Method == http.MethodDelete:
+		i := find()
+		if i < 0 {
+			classicErr(w, http.StatusBadRequest, "api.err.IdInvalid")
+			return
+		}
+		r.wifis = append(r.wifis[:i], r.wifis[i+1:]...)
+		r.wifiApplies++
+		classicOK(w, []any{})
+	default:
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidRequest")
+	}
 }
 
 // Network returns a copy of the stored network with the given name.
@@ -1083,6 +1249,21 @@ func (r *Router) networkItem(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	id := req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
+	if req.Method == http.MethodDelete {
+		for i, n := range r.networks {
+			if n["_id"] == id {
+				if n["attr_no_delete"] == true {
+					classicErr(w, http.StatusBadRequest, "api.err.InvalidRequest")
+					return
+				}
+				r.networks = append(r.networks[:i], r.networks[i+1:]...)
+				classicOK(w, []any{})
+				return
+			}
+		}
+		classicErr(w, http.StatusBadRequest, "api.err.IdInvalid")
+		return
+	}
 	if req.Method != http.MethodPut {
 		classicErr(w, http.StatusMethodNotAllowed, "api.err.MethodNotAllowed")
 		return
@@ -1327,4 +1508,20 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// staticJSON serves a fixed list, wrapped classic-style or as a bare list (v2).
+func (r *Router) staticJSON(data []map[string]any, classic bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if !r.authorised(w, req) {
+			return
+		}
+		if classic {
+			classicOK(w, data)
+			return
+		}
+		writeJSON(w, http.StatusOK, data)
+	}
 }

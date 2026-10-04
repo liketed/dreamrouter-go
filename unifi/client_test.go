@@ -2,6 +2,7 @@ package unifi_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -682,5 +683,71 @@ func TestNetworkDHCPOptions(t *testing.T) {
 	}
 	if _, err := c.UpdateNetwork(ctx, lan.ID, map[string]any{"dhcpd_leasetime": 31536001}); !unifi.HasCode(err, "api.err.IncorrectNumberRange") {
 		t.Fatalf("over a year: %v", err)
+	}
+}
+
+func TestVLANID(t *testing.T) {
+	for raw, want := range map[string]unifi.VLANID{`39`: 39, `"39"`: 39, `""`: 0, `null`: 0} {
+		var n struct {
+			VLAN unifi.VLANID `json:"vlan"`
+		}
+		if err := json.Unmarshal([]byte(`{"vlan":`+raw+`}`), &n); err != nil || n.VLAN != want {
+			t.Errorf("vlan %s = %d, %v; want %d", raw, n.VLAN, err, want)
+		}
+	}
+}
+
+func TestNetworksAndWiFi(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+
+	kids, err := c.CreateNetwork(ctx, unifi.NetworkSpec{Name: "Kids", VLAN: 30, Subnet: "192.168.30.1/24",
+		DHCPStart: "192.168.30.6", DHCPStop: "192.168.30.254", DNS: []string{"94.140.14.15", "94.140.15.16"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kids.VLAN != 30 || !kids.VLANEnabled || len(kids.DNSServers()) != 2 || kids.ID == "" {
+		t.Fatalf("CreateNetwork = %+v", kids)
+	}
+	// Listing still works with a VLAN network (the router sends the VLAN as a number).
+	nets, err := c.ListNetworks(ctx)
+	if err != nil || len(nets) != 3 {
+		t.Fatalf("ListNetworks with a VLAN network: %d, %v", len(nets), err)
+	}
+	if _, err := c.CreateNetwork(ctx, unifi.NetworkSpec{Name: "x", VLAN: 30, Subnet: "192.168.31.1/24",
+		DHCPStart: "192.168.31.6", DHCPStop: "192.168.31.254"}); !unifi.HasCode(err, unifi.CodeVLANUsed) {
+		t.Fatalf("VLAN in use: %v", err)
+	}
+
+	wifi, err := c.CreateWiFi(ctx, unifi.WiFiSpec{Name: "kids-wifi", Password: "correct horse battery", NetworkID: kids.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := r.WiFis()[1]
+	if wifi.Name != "kids-wifi" || !wifi.Enabled || wifi.NetworkID != kids.ID || len(wifi.Bands) != 2 ||
+		stored["security"] != "wpapsk" || stored["ap_group_mode"] != "all" || stored["usergroup_id"] != "usergroup-default" ||
+		stored["x_passphrase"] != "correct horse battery" {
+		t.Fatalf("CreateWiFi = %+v, stored %v", wifi, stored)
+	}
+	list, err := c.ListWiFi(ctx)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("ListWiFi = %v, %v", list, err)
+	}
+	if w, err := c.UpdateWiFi(ctx, wifi.ID, map[string]any{"enabled": false}); err != nil || w.Enabled {
+		t.Fatalf("disable: %+v, %v", w, err)
+	}
+	if err := c.DeleteWiFi(ctx, wifi.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteNetwork(ctx, kids.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteNetwork(ctx, kids.ID); !unifi.IsNotFound(err) {
+		t.Fatalf("deleting again: %v", err)
+	}
+	if r.WiFiApplies() != 3 {
+		t.Fatalf("access point re-applies: %d, want 3 (create, disable, delete)", r.WiFiApplies())
 	}
 }

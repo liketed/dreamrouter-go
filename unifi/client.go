@@ -59,6 +59,9 @@ const (
 	CodeIDInvalid                 = "api.err.IdInvalid"
 	CodePortRangeSizeMismatch     = "api.err.IncorrectMultiportFwdPort"
 	CodeInvalidBackup             = "api.err.InvalidBackup"
+	CodeSubnetOverlapped          = "api.err.SubnetOverlapped"
+	CodeVLANUsed                  = "api.err.VlanUsed"
+	CodeInvalidDHCPRange          = "api.err.InvalidDHCPRange"
 	CodeLoginLimitReached         = "AUTHENTICATION_FAILED_LIMIT_REACHED"
 	CodeInvalidUsernameOrPassword = "AUTHENTICATION_FAILED_INVALID_CREDENTIALS"
 )
@@ -363,6 +366,14 @@ func describeCode(code string) string {
 		return "the router rejected the request as invalid"
 	case "api.err.NotFound", CodeIDInvalid:
 		return "not found"
+	case CodeSubnetOverlapped:
+		return "the subnet overlaps another network's"
+	case CodeVLANUsed:
+		return "another network already uses this VLAN"
+	case CodeInvalidDHCPRange:
+		return "the DHCP range must be inside the subnet, start before it ends"
+	case "api.err.IncorrectIPSubnetSpec":
+		return "the subnet must be given as the router's address on it, e.g. 192.168.30.1/24"
 	case CodeInvalidBackup:
 		return "the file is not a valid backup of the Network application"
 	case CodePortRangeSizeMismatch:

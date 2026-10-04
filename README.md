@@ -16,7 +16,7 @@ go get github.com/liketed/dreamrouter-go
 
 | Package | Contents |
 |---|---|
-| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, backups and restores (with the automatic backup schedule), SSH settings, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
+| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, backups and restores (with the automatic backup schedule), SSH settings, networks (VLANs) and Wi-Fi networks, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
 | [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, network boot / TFTP values, and port forwards (including the conflicts the router doesn't check). |
 | [`fakerouter`](fakerouter) | An in-memory fake of the router's API for tests, with the router's error codes and login limit. |
 
@@ -118,6 +118,15 @@ These are behaviours of the router itself, found while building drctl and the pr
   here). SSH to adopted devices is the Network `mgmt` setting (`x_ssh_enabled`,
   `x_ssh_username`, …); **every write of `mgmt` gives it a new `x_api_token`**, even an
   unchanged one, so `SetDevicesSSH` only writes when something changes.
+- **Networks** (`rest/networkconf`): the router checks overlapping subnets, VLANs in
+  use (and 1 or 4095), DHCP ranges and the subnet form (the router's address, e.g.
+  `192.168.30.1/24`), but accepts duplicate names and public subnets. **The VLAN ID comes
+  back as a number** (older versions: a string); `unifi.VLANID` reads both.
+- **Wi-Fi networks** (`rest/wlanconf`): the router rejects passwords under 8 characters,
+  names over 32 bytes and unknown networks, but accepts duplicate names and 64-character
+  passwords that aren't hex. **Every create, change or delete makes the access points
+  re-apply their settings**, which disconnects Wi-Fi devices on every Wi-Fi network for
+  about 15–30 seconds (even creating a disabled one).
 - **Status** (`GetStatus`) combines `stat/health`, `stat/sysinfo` and the router's entry
   in `stat/device`. Some numbers come as strings (CPU `"13.9"`), others as numbers, and
   the access point and switch counts include the router's built-in Wi-Fi and switch.

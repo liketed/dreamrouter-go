@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/liketed/dreamrouter-go/unifi"
@@ -359,4 +360,150 @@ func DomainName(name string) error {
 		}
 	}
 	return nil
+}
+
+// privateNets are the address ranges a new network may use (RFC 1918). The
+// router itself also accepts public subnets, which would hide those
+// internet addresses from every device on the network.
+var privateNets = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("192.168.0.0/16"),
+}
+
+// NewNetwork checks a new network against the existing ones and fills in
+// a default DHCP range (.6 to the last address but one, like the web UI):
+// a unique name, a VLAN from 2 to 4094 not in use, a private subnet given
+// as the router's address on it that overlaps no other network, a DHCP
+// range inside it, and the DNS servers to hand out.
+func NewNetwork(spec *unifi.NetworkSpec, existing []unifi.Network) error {
+	spec.Name = strings.TrimSpace(spec.Name)
+	if spec.Name == "" {
+		return fmt.Errorf("a network needs a name")
+	}
+	if spec.VLAN < 2 || spec.VLAN > 4094 {
+		return fmt.Errorf("VLAN %d must be from 2 to 4094", spec.VLAN)
+	}
+	p, err := netip.ParsePrefix(spec.Subnet)
+	if err != nil || !p.Addr().Is4() {
+		return fmt.Errorf("subnet %q must be the router's address with a prefix, e.g. 192.168.30.1/24", spec.Subnet)
+	}
+	m := p.Masked()
+	if p.Bits() > 30 {
+		return fmt.Errorf("subnet %s is too small; use a /30 or larger, e.g. a /24", spec.Subnet)
+	}
+	if p.Addr() == m.Addr() || p.Addr() == broadcast(m) {
+		return fmt.Errorf("subnet %q must be given as the router's address on it, e.g. %s", spec.Subnet, m.Addr().Next().String()+"/"+strconv.Itoa(p.Bits()))
+	}
+	private := false
+	for _, n := range privateNets {
+		if n.Contains(m.Addr()) && n.Bits() <= m.Bits() {
+			private = true
+		}
+	}
+	if !private {
+		return fmt.Errorf("subnet %s is not a private range (10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16); devices couldn't reach those internet addresses", m)
+	}
+	for _, n := range existing {
+		if strings.EqualFold(n.Name, spec.Name) {
+			return fmt.Errorf("a network named %q already exists", n.Name)
+		}
+		if int(n.VLAN) == spec.VLAN && n.VLANEnabled {
+			return fmt.Errorf("network %q already uses VLAN %d", n.Name, spec.VLAN)
+		}
+		if op, err := netip.ParsePrefix(n.Subnet); err == nil && op.Masked().Overlaps(m) {
+			return fmt.Errorf("subnet %s overlaps network %q (%s)", m, n.Name, op.Masked())
+		}
+	}
+	if spec.DHCPStart == "" && spec.DHCPStop == "" {
+		a := m.Addr()
+		for i := 0; i < 6 && a.Next().IsValid(); i++ {
+			a = a.Next()
+		}
+		if !m.Contains(a) || a.Compare(broadcast(m)) >= 0 {
+			a = p.Addr().Next()
+		}
+		spec.DHCPStart, spec.DHCPStop = a.String(), broadcast(m).Prev().String()
+	}
+	start, errS := IPv4(spec.DHCPStart)
+	stop, errE := IPv4(spec.DHCPStop)
+	switch {
+	case errS != nil || errE != nil:
+		return fmt.Errorf("DHCP range %s - %s must be IPv4 addresses", spec.DHCPStart, spec.DHCPStop)
+	case !m.Contains(start) || !m.Contains(stop) || start == m.Addr() || stop == broadcast(m):
+		return fmt.Errorf("DHCP range %s - %s must be inside %s", start, stop, m)
+	case stop.Less(start):
+		return fmt.Errorf("DHCP range %s - %s is reversed", start, stop)
+	case start.Compare(p.Addr()) <= 0 && p.Addr().Compare(stop) <= 0:
+		return fmt.Errorf("DHCP range %s - %s includes the router's address %s", start, stop, p.Addr())
+	}
+	return DHCPDNS(spec.DNS)
+}
+
+var hex64 = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
+// WiFiPassword checks a WPA passphrase: 8 to 63 printable ASCII characters,
+// or exactly 64 hex digits (a raw key). The router also accepts 64
+// characters that aren't hex, which no device could use.
+func WiFiPassword(pw string) error {
+	if hex64.MatchString(pw) {
+		return nil
+	}
+	if len(pw) < 8 || len(pw) > 63 {
+		return fmt.Errorf("a Wi-Fi password must be 8 to 63 characters (or 64 hex digits), not %d", len(pw))
+	}
+	for _, r := range pw {
+		if r < 0x20 || r > 0x7e {
+			return fmt.Errorf("a Wi-Fi password may only contain printable ASCII characters")
+		}
+	}
+	return nil
+}
+
+// WiFiBands checks the bands to broadcast on: "2g", "5g" and "6g".
+func WiFiBands(bands []string) error {
+	if len(bands) == 0 {
+		return fmt.Errorf("give at least one band: 2g, 5g or 6g")
+	}
+	seen := map[string]bool{}
+	for _, b := range bands {
+		switch b {
+		case "2g", "5g", "6g":
+		default:
+			return fmt.Errorf("band %q must be 2g, 5g or 6g", b)
+		}
+		if seen[b] {
+			return fmt.Errorf("band %s is listed twice", b)
+		}
+		seen[b] = true
+	}
+	return nil
+}
+
+// NewWiFi checks a new Wi-Fi network: a name (SSID) of 1 to 32 bytes that
+// no other Wi-Fi network uses (the router accepts duplicates, which would
+// confuse every device), a valid password, valid bands, and an existing
+// network to attach it to.
+func NewWiFi(spec *unifi.WiFiSpec, existing []unifi.WiFi, networks []unifi.Network) error {
+	if spec.Name == "" || len(spec.Name) > 32 {
+		return fmt.Errorf("a Wi-Fi network name must be 1 to 32 bytes, not %d", len(spec.Name))
+	}
+	for _, w := range existing {
+		if w.Name == spec.Name {
+			return fmt.Errorf("a Wi-Fi network named %q already exists", w.Name)
+		}
+	}
+	if err := WiFiPassword(spec.Password); err != nil {
+		return err
+	}
+	if len(spec.Bands) == 0 {
+		spec.Bands = []string{"2g", "5g"}
+	}
+	if err := WiFiBands(spec.Bands); err != nil {
+		return err
+	}
+	for _, n := range networks {
+		if n.ID == spec.NetworkID {
+			return nil
+		}
+	}
+	return fmt.Errorf("no network with ID %q", spec.NetworkID)
 }

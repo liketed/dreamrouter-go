@@ -73,9 +73,11 @@ func (c *Client) DeleteDNS(ctx context.Context, id string) error {
 type Network struct {
 	ID          string `json:"_id"`
 	Name        string `json:"name"`
-	Purpose     string `json:"purpose"`   // e.g. "corporate", "guest", "wan"
-	Subnet      string `json:"ip_subnet"` // gateway address with prefix, e.g. 192.168.1.1/24
-	VLAN        string `json:"vlan,omitempty"`
+	Purpose     string `json:"purpose"`        // e.g. "corporate", "guest", "wan"
+	Subnet      string `json:"ip_subnet"`      // gateway address with prefix, e.g. 192.168.1.1/24
+	VLAN        VLANID `json:"vlan,omitempty"` // 0 for the untagged LAN
+	VLANEnabled bool   `json:"vlan_enabled"`
+	NoDelete    bool   `json:"attr_no_delete"` // the router's own networks (e.g. Default)
 	DHCPEnabled bool   `json:"dhcpd_enabled"`
 	DHCPStart   string `json:"dhcpd_start"`
 	DHCPStop    string `json:"dhcpd_stop"`
