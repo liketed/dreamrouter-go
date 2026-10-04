@@ -647,3 +647,40 @@ func TestSSH(t *testing.T) {
 		t.Fatalf("SetDevicesSSH(false): %v (%d writes)", m, writes)
 	}
 }
+
+func TestNetworkDHCPOptions(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+	nets, _ := c.ListNetworks(ctx)
+	var lan unifi.Network
+	for _, n := range nets {
+		if n.Name == "Default" {
+			lan = n
+		}
+	}
+	if lan.DNSServers() != nil || lan.NTPServers() != nil || lan.Lease() != 24*time.Hour {
+		t.Fatalf("defaults: %v %v %v", lan.DNSServers(), lan.NTPServers(), lan.Lease())
+	}
+	fields := unifi.DNSFields([]string{"192.168.1.1", "1.1.1.1"})
+	for k, v := range unifi.NTPFields([]string{"192.168.1.1"}) {
+		fields[k] = v
+	}
+	fields["dhcpd_leasetime"] = 43200
+	n, err := c.UpdateNetwork(ctx, lan.ID, fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := n.DNSServers(); len(got) != 2 || got[1] != "1.1.1.1" || n.DNS3 != "" || n.Lease() != 12*time.Hour ||
+		len(n.NTPServers()) != 1 {
+		t.Fatalf("after update: dns %v ntp %v lease %v", n.DNSServers(), n.NTPServers(), n.Lease())
+	}
+	n, err = c.UpdateNetwork(ctx, lan.ID, unifi.DNSFields(nil))
+	if err != nil || n.DNSServers() != nil || n.DNS1 != "" {
+		t.Fatalf("back to the router as DNS: %+v %v", n.DNSServers(), err)
+	}
+	if _, err := c.UpdateNetwork(ctx, lan.ID, map[string]any{"dhcpd_leasetime": 31536001}); !unifi.HasCode(err, "api.err.IncorrectNumberRange") {
+		t.Fatalf("over a year: %v", err)
+	}
+}

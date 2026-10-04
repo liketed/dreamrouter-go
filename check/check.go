@@ -298,3 +298,65 @@ func TFTPServer(s string) error {
 	}
 	return nil
 }
+
+// Lease time limits: dnsmasq raises anything under 2 minutes to 2 minutes,
+// and the router refuses more than a year.
+const (
+	MinLeaseTime = 120
+	MaxLeaseTime = 365 * 24 * 3600
+)
+
+// LeaseTime checks a DHCP lease time in seconds.
+func LeaseTime(seconds int) error {
+	if seconds < MinLeaseTime || seconds > MaxLeaseTime {
+		return fmt.Errorf("lease time %ds must be between 2 minutes (%d) and a year (%d)", seconds, MinLeaseTime, MaxLeaseTime)
+	}
+	return nil
+}
+
+// DHCPDNS checks the DNS servers to hand out by DHCP: up to four distinct
+// IPv4 addresses (none means the router itself). The router accepts host
+// names, lists and IPv6 addresses here, which DHCP can't hand out.
+func DHCPDNS(servers []string) error {
+	return ipv4List("DNS server", servers, 4)
+}
+
+// NTPServers checks the NTP servers to hand out by DHCP: up to two distinct
+// IPv4 addresses.
+func NTPServers(servers []string) error {
+	return ipv4List("NTP server", servers, 2)
+}
+
+func ipv4List(what string, servers []string, max int) error {
+	if len(servers) > max {
+		return fmt.Errorf("at most %d %ss can be handed out, not %d", max, what, len(servers))
+	}
+	seen := map[string]bool{}
+	for _, s := range servers {
+		a, err := IPv4(s)
+		if err != nil || a.String() != strings.TrimSpace(s) {
+			return fmt.Errorf("%s %q must be an IPv4 address", what, s)
+		}
+		if seen[a.String()] {
+			return fmt.Errorf("%s %s is listed twice", what, a)
+		}
+		seen[a.String()] = true
+	}
+	return nil
+}
+
+var domainLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// DomainName checks a network's domain name (handed out by DHCP as the
+// search domain), e.g. "home.internal".
+func DomainName(name string) error {
+	if name == "" || len(name) > 253 {
+		return fmt.Errorf("domain name %q must be 1 to 253 characters", name)
+	}
+	for _, label := range strings.Split(name, ".") {
+		if !domainLabel.MatchString(label) {
+			return fmt.Errorf("domain name %q must be lower-case letters, digits and hyphens, separated by dots", name)
+		}
+	}
+	return nil
+}

@@ -1119,6 +1119,31 @@ func (r *Router) networkItem(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 		}
+		// The router's checks on DHCP options: lease time a whole number up to
+		// a year (anything lower, even 0, is accepted), NTP servers IP
+		// addresses, and a domain name without spaces or commas. DNS servers
+		// are not checked at all.
+		if v, ok := fields["dhcpd_leasetime"]; ok {
+			f, isNum := v.(float64)
+			if !isNum || f != float64(int64(f)) {
+				classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+				return
+			}
+			if f > 31536000 {
+				classicErr(w, http.StatusBadRequest, "api.err.IncorrectNumberRange")
+				return
+			}
+		}
+		for _, k := range []string{"dhcpd_ntp_1", "dhcpd_ntp_2"} {
+			if v, _ := fields[k].(string); v != "" && net.ParseIP(v) == nil {
+				classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+				return
+			}
+		}
+		if v, ok := fields["domain_name"].(string); ok && strings.ContainsAny(v, " ,") {
+			classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+			return
+		}
 		updated["setting_preference"] = "manual" // as the web UI does on every save
 		for k := range updated {
 			n[k] = updated[k]

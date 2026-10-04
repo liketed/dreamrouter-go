@@ -91,6 +91,88 @@ type Network struct {
 	// TFTPServer is DHCP option 66. It is handed out whenever it is set,
 	// independently of BootEnabled.
 	TFTPServer string `json:"dhcpd_tftp_server"`
+
+	// DNS servers handed out by DHCP. Without DNSEnabled, devices are given
+	// the router itself. The router accepts anything in these fields (host
+	// names, lists, gaps), so check with check.DHCPDNS first.
+	DNSEnabled bool   `json:"dhcpd_dns_enabled"`
+	DNS1       string `json:"dhcpd_dns_1"`
+	DNS2       string `json:"dhcpd_dns_2"`
+	DNS3       string `json:"dhcpd_dns_3"`
+	DNS4       string `json:"dhcpd_dns_4"`
+	// LeaseTime is the DHCP lease time in seconds; 0 means not set (the
+	// router's default, 86400).
+	LeaseTime int `json:"dhcpd_leasetime"`
+	// NTP servers handed out by DHCP (option 42), while NTPEnabled is set.
+	NTPEnabled bool   `json:"dhcpd_ntp_enabled"`
+	NTP1       string `json:"dhcpd_ntp_1"`
+	NTP2       string `json:"dhcpd_ntp_2"`
+}
+
+// DefaultLeaseTime is the router's DHCP lease time when none is set.
+const DefaultLeaseTime = 86400
+
+// DNSServers returns the DNS servers handed out by DHCP, or nil if devices
+// are given the router itself.
+func (n Network) DNSServers() []string {
+	if !n.DNSEnabled {
+		return nil
+	}
+	return nonEmpty(n.DNS1, n.DNS2, n.DNS3, n.DNS4)
+}
+
+// NTPServers returns the NTP servers handed out by DHCP, or nil if none.
+func (n Network) NTPServers() []string {
+	if !n.NTPEnabled {
+		return nil
+	}
+	return nonEmpty(n.NTP1, n.NTP2)
+}
+
+// Lease returns the DHCP lease time in effect.
+func (n Network) Lease() time.Duration {
+	if n.LeaseTime <= 0 {
+		return DefaultLeaseTime * time.Second
+	}
+	return time.Duration(n.LeaseTime) * time.Second
+}
+
+func nonEmpty(values ...string) []string {
+	var out []string
+	for _, v := range values {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// DNSFields returns the API fields that hand out these DNS servers; none
+// means devices are given the router itself.
+func DNSFields(servers []string) map[string]any {
+	f := map[string]any{"dhcpd_dns_enabled": len(servers) > 0}
+	for i := 0; i < 4; i++ {
+		v := ""
+		if i < len(servers) {
+			v = servers[i]
+		}
+		f[fmt.Sprintf("dhcpd_dns_%d", i+1)] = v
+	}
+	return f
+}
+
+// NTPFields returns the API fields that hand out these NTP servers; none
+// turns the option off.
+func NTPFields(servers []string) map[string]any {
+	f := map[string]any{"dhcpd_ntp_enabled": len(servers) > 0}
+	for i := 0; i < 2; i++ {
+		v := ""
+		if i < len(servers) {
+			v = servers[i]
+		}
+		f[fmt.Sprintf("dhcpd_ntp_%d", i+1)] = v
+	}
+	return f
 }
 
 // ListNetworks returns the configured networks.

@@ -122,6 +122,12 @@ These are behaviours of the router itself, found while building drctl and the pr
   in `stat/device`. Some numbers come as strings (CPU `"13.9"`), others as numbers, and
   the access point and switch counts include the router's built-in Wi-Fi and switch.
 - **Notes**: clearing a note (`note: ""`) works, but the router keeps `noted` set.
+- **DHCP options** on a network (`dhcpd_dns_enabled` + `dhcpd_dns_1`..`4`,
+  `dhcpd_leasetime`, `dhcpd_ntp_enabled` + `dhcpd_ntp_1`/`2`, `domain_name`): the router
+  stores anything in the DNS fields (host names, lists, IPv6, gaps) and accepts lease
+  times from 0 seconds to a year; it does check NTP servers (IP addresses) and domain
+  names (no spaces or commas). Use `check.DHCPDNS`, `check.LeaseTime`, `check.NTPServers`
+  and `check.DomainName`, and `unifi.DNSFields` / `unifi.NTPFields` to build updates.
 - **Propagation.** Changes reach the router's DNS and DHCP server (dnsmasq) about
   10–20 seconds after the API call returns.
 - This is the Network application's internal, undocumented API, the one its web UI
