@@ -3,6 +3,7 @@ package unifi
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,10 @@ type Status struct {
 	UpdateAvailable bool
 
 	SpeedTest SpeedTest
+
+	// WANs is the live state of every internet connection's port (Internet
+	// covers only the first).
+	WANs []WANLink
 
 	// Subsystems is each part's health: "wan", "www" (internet), "lan",
 	// "wlan", "vpn", with "ok", "warning", "error" or "unknown".
@@ -175,6 +180,7 @@ type rawDevice struct {
 	} `json:"temperatures"`
 	Uplink    rawPort `json:"uplink"`
 	WAN1      rawPort `json:"wan1"`
+	WAN2      rawPort `json:"wan2"`
 	SpeedTest struct {
 		RunDate      flexNum `json:"rundate"`
 		XputDownload flexNum `json:"xput_download"`
@@ -277,6 +283,12 @@ func (c *Client) GetStatus(ctx context.Context) (Status, error) {
 			}
 		}
 		s.Internet.Up, s.Internet.Interface, s.Internet.LinkMbps = d.WAN1.Up, d.WAN1.Name, d.WAN1.Speed
+		for group, l := range map[string]rawPort{"WAN": d.WAN1, "WAN2": d.WAN2} {
+			if l.Name != "" {
+				s.WANs = append(s.WANs, WANLink{NetworkGroup: group, Interface: l.Name, Up: l.Up, IP: l.IP})
+			}
+		}
+		sort.Slice(s.WANs, func(i, j int) bool { return s.WANs[i].NetworkGroup < s.WANs[j].NetworkGroup })
 		if s.Internet.IP == "" {
 			s.Internet.IP = d.WAN1.IP
 		}

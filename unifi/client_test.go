@@ -751,3 +751,49 @@ func TestNetworksAndWiFi(t *testing.T) {
 		t.Fatalf("access point re-applies: %d, want 3 (create, disable, delete)", r.WiFiApplies())
 	}
 }
+
+func TestWANsAndPorts(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	r.AddWAN2()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+
+	wans, err := c.ListWANs(ctx)
+	if err != nil || len(wans) != 2 || wans[0].Name != "Internet 1" || wans[0].Type != "pppoe" || wans[0].VLAN != 10 ||
+		wans[0].Password != "isp-password" || wans[1].NetworkGroup != "WAN2" || wans[1].Type != "dhcp" {
+		t.Fatalf("ListWANs = %+v, %v", wans, err)
+	}
+	ports, links, err := c.Ports(ctx)
+	if err != nil || len(ports) != 5 || ports[3].Name != "Port 4" || ports[3].Role != "WAN" || ports[4].Role != "WAN2" || ports[2].Role != "LAN" {
+		t.Fatalf("Ports = %+v, %v", ports, err)
+	}
+	if len(links) != 2 || !links[0].Up || links[0].IP != "203.0.113.7" || links[1].Interface != "eth4" || links[1].Up {
+		t.Fatalf("WAN links = %+v", links)
+	}
+
+	// Internet 2 to Port 3 with the provider's PPPoE login: it comes up.
+	r.AcceptPPPoE("eir@eir.ie")
+	if _, err := c.UpdateWAN(ctx, wans[1].ID, map[string]any{"wan_type": "pppoe", "wan_username": "eir@eir.ie",
+		"x_wan_password": "broadband1", "wan_vlan_enabled": true, "wan_vlan": 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetPortRoles(ctx, map[string]string{"eth0": "LAN", "eth1": "LAN", "eth2": "WAN2", "eth3": "WAN", "eth4": "LAN"}); err != nil {
+		t.Fatal(err)
+	}
+	_, links, _ = c.Ports(ctx)
+	if links[1].Interface != "eth2" || !links[1].Up || links[1].IP != "198.51.100.9" {
+		t.Fatalf("Internet 2 after the move: %+v", links[1])
+	}
+	st, err := c.GetStatus(ctx)
+	if err != nil || len(st.WANs) != 2 || st.WANs[1].Interface != "eth2" || !st.WANs[1].Up {
+		t.Fatalf("GetStatus WANs = %+v, %v", st.WANs, err)
+	}
+	// The router's own checks.
+	if _, err := c.UpdateWAN(ctx, wans[1].ID, map[string]any{"x_wan_password": ""}); !unifi.HasCode(err, unifi.CodeInvalidPPPoECredentials) {
+		t.Fatalf("empty PPPoE password: %v", err)
+	}
+	if err := c.SetPortRoles(ctx, map[string]string{"eth0": "LAN", "eth1": "LAN", "eth2": "WAN", "eth3": "WAN", "eth4": "LAN"}); err == nil {
+		t.Fatal("two ports for Internet 1 accepted")
+	}
+}

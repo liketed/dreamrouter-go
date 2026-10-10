@@ -507,3 +507,65 @@ func NewWiFi(spec *unifi.WiFiSpec, existing []unifi.WiFi, networks []unifi.Netwo
 	}
 	return fmt.Errorf("no network with ID %q", spec.NetworkID)
 }
+
+// WAN checks an internet connection's settings before they are written:
+// the type, PPPoE credentials, a VLAN from 1 to 4094, a static address,
+// netmask and gateway in the same subnet, and manual DNS servers. The
+// router checks these too; this gives clearer messages first.
+func WAN(w *unifi.WAN) error {
+	switch w.Type {
+	case "pppoe":
+		if w.Username == "" || w.Password == "" {
+			return fmt.Errorf("PPPoE needs a username and a password")
+		}
+	case "dhcp":
+	case "static":
+		ip, err := IPv4(w.IP)
+		if err != nil {
+			return fmt.Errorf("static address: %w", err)
+		}
+		mask, err := IPv4(w.Netmask)
+		if err != nil {
+			return fmt.Errorf("netmask: %w", err)
+		}
+		bits := 0
+		for _, b := range mask.As4() {
+			for i := 7; i >= 0; i-- {
+				if b&(1<<i) != 0 {
+					bits++
+				}
+			}
+		}
+		pfx, _ := ip.Prefix(bits)
+		if m, _ := netip.AddrFrom4([4]byte{255, 255, 255, 255}).Prefix(bits); m.Addr() != mask {
+			return fmt.Errorf("netmask %s is not a valid netmask", mask)
+		}
+		gw, err := IPv4(w.Gateway)
+		if err != nil {
+			return fmt.Errorf("gateway: %w", err)
+		}
+		if !pfx.Contains(gw) || gw == ip {
+			return fmt.Errorf("gateway %s must be another address in %s", gw, pfx)
+		}
+	default:
+		return fmt.Errorf("connection type %q must be pppoe, dhcp or static", w.Type)
+	}
+	if w.VLANEnabled && (w.VLAN < 1 || w.VLAN > 4094) {
+		return fmt.Errorf("VLAN %d must be from 1 to 4094", w.VLAN)
+	}
+	if w.DNSPreference == "manual" {
+		var dns []string
+		for _, d := range []string{w.DNS1, w.DNS2} {
+			if d != "" {
+				dns = append(dns, d)
+			}
+		}
+		if len(dns) == 0 {
+			return fmt.Errorf("manual DNS needs at least one server")
+		}
+		if err := ipv4List("DNS server", dns, 2); err != nil {
+			return err
+		}
+	}
+	return nil
+}

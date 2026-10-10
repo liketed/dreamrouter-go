@@ -16,7 +16,7 @@ go get github.com/liketed/dreamrouter-go
 
 | Package | Contents |
 |---|---|
-| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, backups and restores (with the automatic backup schedule), SSH settings, networks (VLANs) and Wi-Fi networks, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
+| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, backups and restores (with the automatic backup schedule), SSH settings, networks (VLANs) and Wi-Fi networks, internet connections (WAN) and port roles, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
 | [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, network boot / TFTP values, and port forwards (including the conflicts the router doesn't check). |
 | [`fakerouter`](fakerouter) | An in-memory fake of the router's API for tests, with the router's error codes and login limit. |
 
@@ -127,6 +127,14 @@ These are behaviours of the router itself, found while building drctl and the pr
   passwords that aren't hex. **Every create, change or delete makes the access points
   re-apply their settings**, which disconnects Wi-Fi devices on every Wi-Fi network for
   about 15–30 seconds (even creating a disabled one).
+- **Internet connections** are networks with purpose `wan` (`wan_type` pppoe/dhcp/static,
+  `wan_username`, `x_wan_password`, `wan_vlan_enabled`/`wan_vlan`, `wan_dns_preference` and
+  `wan_dns1`/`2`, `wan_ip`/`netmask`/`gateway`). The router checks them well (PPPoE
+  credentials, VLAN 1–4094, a gateway for static). **Which port each connection uses** is
+  the router device's `ethernet_overrides` (interface → `WAN`, `WAN2` or `LAN`), changed
+  with `PUT rest/device/{id}`; the web UI numbers ports from 1 (Port 3 is `eth2`). Right
+  after a change the router still reports the old link state for several seconds, so
+  wait before judging whether a connection came back.
 - **Status** (`GetStatus`) combines `stat/health`, `stat/sysinfo` and the router's entry
   in `stat/device`. Some numbers come as strings (CPU `"13.9"`), others as numbers, and
   the access point and switch counts include the router's built-in Wi-Fi and switch.

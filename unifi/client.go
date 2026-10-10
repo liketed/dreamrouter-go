@@ -62,6 +62,7 @@ const (
 	CodeSubnetOverlapped          = "api.err.SubnetOverlapped"
 	CodeVLANUsed                  = "api.err.VlanUsed"
 	CodeInvalidDHCPRange          = "api.err.InvalidDHCPRange"
+	CodeInvalidPPPoECredentials   = "api.err.InvalidWanPppoeCredentials"
 	CodeLoginLimitReached         = "AUTHENTICATION_FAILED_LIMIT_REACHED"
 	CodeInvalidUsernameOrPassword = "AUTHENTICATION_FAILED_INVALID_CREDENTIALS"
 )
@@ -366,6 +367,12 @@ func describeCode(code string) string {
 		return "the router rejected the request as invalid"
 	case "api.err.NotFound", CodeIDInvalid:
 		return "not found"
+	case CodeInvalidPPPoECredentials:
+		return "PPPoE needs a username and a password"
+	case "api.err.MissingQosTag":
+		return "the VLAN must be from 1 to 4094"
+	case "api.err.StaticWanMustHaveGatewayField":
+		return "a static connection needs an address, netmask and gateway"
 	case CodeSubnetOverlapped:
 		return "the subnet overlaps another network's"
 	case CodeVLANUsed:

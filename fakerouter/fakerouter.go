@@ -118,6 +118,152 @@ type Router struct {
 	mgmtWrites  int
 	wifis       []map[string]any
 	wifiApplies int
+	portRoles   map[string]string // interface -> "LAN", "WAN", "WAN2"
+	portLinks   map[string]bool   // interface -> cable connected
+	pppoeOK     map[string]bool   // PPPoE usernames the "provider" accepts
+	portWrites  int
+}
+
+var fakePorts = []struct {
+	idx         int
+	name, iface string
+	media       string
+}{{1, "Port 1", "eth0", "2.5GE"}, {2, "Port 2", "eth1", "2.5GE"}, {3, "Port 3", "eth2", "2.5GE"}, {4, "Port 4", "eth3", "2.5GE"}, {5, "SFP+ 1", "eth4", "SFP+"}}
+
+// AddWAN2 adds a second internet connection ("Internet 2", DHCP), as the
+// router has even when it isn't used.
+func (r *Router) AddWAN2() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.networks = append(r.networks, map[string]any{"_id": "net-wan2", "name": "Internet 2", "purpose": "wan", "attr_no_delete": true,
+		"wan_networkgroup": "WAN2", "wan_type": "dhcp", "wan_vlan_enabled": false, "wan_dns_preference": "auto",
+		"wan_failover_priority": 2.0, "wan_load_balance_type": "failover-only"})
+}
+
+// SetPortLink plugs a cable into a port (or pulls it).
+func (r *Router) SetPortLink(iface string, up bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.portLinks[iface] = up
+}
+
+// AcceptPPPoE makes the "provider" accept a PPPoE username.
+func (r *Router) AcceptPPPoE(username string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pppoeOK[username] = true
+}
+
+// PortRoles returns the port roles and how many times they were written.
+func (r *Router) PortRoles() (map[string]string, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := map[string]string{}
+	for k, v := range r.portRoles {
+		c[k] = v
+	}
+	return c, r.portWrites
+}
+
+// wanUp reports whether the connection for a network group is up: its port
+// has a link and, for PPPoE, the provider accepts the username.
+func (r *Router) wanUpLocked(group string) (iface string, up bool) {
+	for i, g := range r.portRoles {
+		if g == group {
+			iface = i
+		}
+	}
+	if iface == "" || !r.portLinks[iface] {
+		return iface, false
+	}
+	for _, n := range r.networks {
+		if n["purpose"] == "wan" && n["wan_networkgroup"] == group {
+			if n["wan_type"] == "pppoe" {
+				u, _ := n["wan_username"].(string)
+				return iface, r.pppoeOK[u]
+			}
+			return iface, true
+		}
+	}
+	return iface, false
+}
+
+// devicesLocked returns stat/device with the router's ports and internet
+// connections computed from the current state.
+func (r *Router) devicesLocked() []map[string]any {
+	out := make([]map[string]any, 0, len(r.stat.Devices))
+	for _, d := range r.stat.Devices {
+		c := map[string]any{}
+		for k, v := range d {
+			c[k] = v
+		}
+		if c["type"] == "udm" {
+			var overrides, ports []map[string]any
+			for _, p := range fakePorts {
+				overrides = append(overrides, map[string]any{"ifname": p.iface, "networkgroup": r.portRoles[p.iface]})
+				speed := 10
+				if r.portLinks[p.iface] {
+					speed = 1000
+				}
+				ports = append(ports, map[string]any{"port_idx": p.idx, "name": p.name, "ifname": p.iface, "media": p.media, "up": r.portLinks[p.iface], "speed": speed})
+			}
+			c["ethernet_overrides"], c["port_table"] = overrides, ports
+			for group, key := range map[string]string{"WAN": "wan1", "WAN2": "wan2"} {
+				iface, up := r.wanUpLocked(group)
+				link := map[string]any{"name": iface, "ifname": iface, "up": up, "speed": 2500}
+				if up {
+					link["ip"] = map[string]string{"WAN": "203.0.113.7", "WAN2": "198.51.100.9"}[group]
+				}
+				if group == "WAN" {
+					if old, ok := d["wan1"].(map[string]any); ok {
+						for k, v := range old {
+							if _, set := link[k]; !set {
+								link[k] = v
+							}
+						}
+					}
+				}
+				c[key] = link
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// deviceItem serves PUT rest/device/{id}: the router's port roles.
+func (r *Router) deviceItem(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	var body struct {
+		Overrides []struct {
+			Iface string `json:"ifname"`
+			Group string `json:"networkgroup"`
+		} `json:"ethernet_overrides"`
+	}
+	if req.Method != http.MethodPut || json.NewDecoder(req.Body).Decode(&body) != nil {
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+		return
+	}
+	roles, groups := map[string]string{}, map[string]int{}
+	for _, o := range body.Overrides {
+		if _, dup := roles[o.Iface]; dup || (o.Group != "LAN" && o.Group != "WAN" && o.Group != "WAN2") {
+			classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+			return
+		}
+		roles[o.Iface] = o.Group
+		groups[o.Group]++
+	}
+	if groups["WAN"] != 1 || groups["WAN2"] > 1 {
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
+		return
+	}
+	r.portRoles = roles
+	r.portWrites++
+	classicOK(w, []any{})
 }
 
 // RouterSSH reports whether SSH to the router is on.
@@ -717,7 +863,9 @@ func New() *Router {
 	r := &Router{sessions: map[string]bool{}, networks: []map[string]any{
 		{"_id": NetworkID, "name": "Default", "purpose": "corporate", "ip_subnet": "192.168.1.1/24", "attr_no_delete": true,
 			"dhcpd_enabled": true, "dhcpd_start": "192.168.1.6", "dhcpd_stop": "192.168.1.254", "domain_name": "localdomain"},
-		{"_id": "net-wan", "name": "Internet 1", "purpose": "wan"},
+		{"_id": "net-wan", "name": "Internet 1", "purpose": "wan", "attr_no_delete": true, "wan_networkgroup": "WAN",
+			"wan_type": "pppoe", "wan_username": "user@isp.example", "x_wan_password": "isp-password", "wan_vlan_enabled": true,
+			"wan_vlan": 10.0, "wan_dns_preference": "auto", "wan_failover_priority": 1.0, "wan_load_balance_type": "weighted"},
 	}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/login", r.login)
@@ -755,7 +903,11 @@ func New() *Router {
 	mux.HandleFunc("/proxy/network/api/s/default/rest/portforward/", r.portForwards)
 	mux.HandleFunc("/proxy/network/api/s/default/stat/health", r.statHandler(func() any { return r.stat.Health }))
 	mux.HandleFunc("/proxy/network/api/s/default/stat/sysinfo", r.statHandler(func() any { return []map[string]any{r.stat.Sysinfo} }))
-	mux.HandleFunc("/proxy/network/api/s/default/stat/device", r.statHandler(func() any { return r.stat.Devices }))
+	mux.HandleFunc("/proxy/network/api/s/default/stat/device", r.statHandler(func() any { return r.devicesLocked() }))
+	mux.HandleFunc("/proxy/network/api/s/default/rest/device/", r.deviceItem)
+	r.portRoles = map[string]string{"eth0": "LAN", "eth1": "LAN", "eth2": "LAN", "eth3": "WAN", "eth4": "WAN2"}
+	r.portLinks = map[string]bool{"eth0": true, "eth2": true, "eth3": true}
+	r.pppoeOK = map[string]bool{"user@isp.example": true}
 	r.stat = defaultStat()
 	r.Server = httptest.NewTLSServer(mux)
 	return r
@@ -1325,6 +1477,12 @@ func (r *Router) networkItem(w http.ResponseWriter, req *http.Request) {
 			classicErr(w, http.StatusBadRequest, "api.err.InvalidPayload")
 			return
 		}
+		if updated["purpose"] == "wan" {
+			if code := fakeWANInvalid(updated); code != "" {
+				classicErr(w, http.StatusBadRequest, code)
+				return
+			}
+		}
 		updated["setting_preference"] = "manual" // as the web UI does on every save
 		for k := range updated {
 			n[k] = updated[k]
@@ -1524,4 +1682,43 @@ func (r *Router) staticJSON(data []map[string]any, classic bool) http.HandlerFun
 		}
 		writeJSON(w, http.StatusOK, data)
 	}
+}
+
+// fakeWANInvalid mirrors the router's checks on an internet connection.
+func fakeWANInvalid(n map[string]any) string {
+	switch n["wan_type"] {
+	case "pppoe":
+		u, _ := n["wan_username"].(string)
+		p, _ := n["x_wan_password"].(string)
+		if u == "" || p == "" {
+			return "api.err.InvalidWanPppoeCredentials"
+		}
+	case "static":
+		if g, _ := n["wan_gateway"].(string); g == "" {
+			return "api.err.StaticWanMustHaveGatewayField"
+		}
+		for _, k := range []string{"wan_ip", "wan_netmask", "wan_gateway"} {
+			if v, _ := n[k].(string); net.ParseIP(v) == nil {
+				return "api.err.InvalidPayload"
+			}
+		}
+	case "dhcp":
+	default:
+		return "api.err.InvalidPayload"
+	}
+	if on, _ := n["wan_vlan_enabled"].(bool); on {
+		v, _ := n["wan_vlan"].(float64)
+		if v == 0 {
+			return "api.err.MissingQosTag"
+		}
+		if v < 1 || v > 4094 {
+			return "api.err.InvalidPayload"
+		}
+	}
+	for _, k := range []string{"wan_dns1", "wan_dns2"} {
+		if v, _ := n[k].(string); v != "" && net.ParseIP(v) == nil {
+			return "api.err.InvalidPayload"
+		}
+	}
+	return ""
 }
