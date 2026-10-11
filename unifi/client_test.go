@@ -838,3 +838,32 @@ func TestSetPrimaryWAN(t *testing.T) {
 		t.Fatalf("active after switching back: %q", active)
 	}
 }
+
+func TestRoutes(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+	if list, err := c.ListRoutes(ctx); err != nil || len(list) != 0 {
+		t.Fatalf("ListRoutes = %v, %v", list, err)
+	}
+	rt, err := c.CreateRoute(ctx, unifi.StaticRoute{Name: "cudy", Enabled: true, Network: "192.168.2.0/24", NextHop: "192.168.1.4"})
+	if err != nil || rt.ID == "" || rt.Distance != 1 || rt.Kind != "nexthop-route" || !rt.Enabled {
+		t.Fatalf("CreateRoute = %+v, %v", rt, err)
+	}
+	if _, err := c.CreateRoute(ctx, unifi.StaticRoute{Name: "again", Network: "192.168.2.0/24", NextHop: "192.168.1.5"}); !unifi.HasCode(err, unifi.CodeRouteNetworkExists) {
+		t.Fatalf("duplicate network: %v", err)
+	}
+	if _, err := c.CreateRoute(ctx, unifi.StaticRoute{Name: "lan", Network: "192.168.1.0/24", NextHop: "192.168.1.4"}); !unifi.HasCode(err, unifi.CodeRouteToConnectedNetwork) {
+		t.Fatalf("route to the LAN: %v", err)
+	}
+	if u, err := c.UpdateRoute(ctx, rt.ID, map[string]any{"enabled": false}); err != nil || u.Enabled {
+		t.Fatalf("disable: %+v %v", u, err)
+	}
+	if err := c.DeleteRoute(ctx, rt.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteRoute(ctx, rt.ID); !unifi.IsNotFound(err) {
+		t.Fatalf("deleting again: %v", err)
+	}
+}

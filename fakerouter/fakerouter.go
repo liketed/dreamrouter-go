@@ -123,6 +123,117 @@ type Router struct {
 	pppoeOK     map[string]bool   // PPPoE usernames the "provider" accepts
 	portWrites  int
 	noTraffic   map[string]bool // network groups that are up but carry no traffic
+	routes      []map[string]any
+}
+
+// Routes returns the stored static routes.
+func (r *Router) Routes() []map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]map[string]any, len(r.routes))
+	for i, rt := range r.routes {
+		c := map[string]any{}
+		for k, v := range rt {
+			c[k] = v
+		}
+		out[i] = c
+	}
+	return out
+}
+
+// routeInvalid mirrors the router's checks on a static route. Like the
+// router, it accepts next hops outside the LANs (or the router itself) and
+// duplicate names.
+func (r *Router) routeInvalidLocked(rt map[string]any, id string) string {
+	name, _ := rt["name"].(string)
+	d, _ := rt["static-route_distance"].(float64)
+	hop, _ := rt["static-route_nexthop"].(string)
+	if name == "" || d < 1 || d > 255 || net.ParseIP(hop) == nil {
+		return "api.err.InvalidPayload"
+	}
+	p, err := netip.ParsePrefix(fmt.Sprint(rt["static-route_network"]))
+	if err != nil {
+		return "api.err.InvalidPayload"
+	}
+	if p.Bits() == 0 {
+		return "api.err.InvalidPayload"
+	}
+	if p != p.Masked() {
+		return "api.err.InvalidDestinationNetwork"
+	}
+	for _, n := range r.networks {
+		if np, err := netip.ParsePrefix(fmt.Sprint(n["ip_subnet"])); err == nil && np.Masked().Overlaps(p) {
+			return "api.err.NoRoutesToDirectlyConnectedNetworks"
+		}
+	}
+	for _, o := range r.routes {
+		if o["_id"] != id && o["static-route_network"] == p.String() {
+			return "api.err.DestinationNetworkExisted"
+		}
+	}
+	return ""
+}
+
+func (r *Router) routing(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.authorised(w, req) {
+		return
+	}
+	id := strings.TrimPrefix(strings.TrimPrefix(req.URL.Path, "/proxy/network/api/s/default/rest/routing"), "/")
+	var body map[string]any
+	if req.Method == http.MethodPost || req.Method == http.MethodPut {
+		_ = json.NewDecoder(req.Body).Decode(&body)
+	}
+	find := func() int {
+		for i, rt := range r.routes {
+			if rt["_id"] == id {
+				return i
+			}
+		}
+		return -1
+	}
+	switch {
+	case req.Method == http.MethodGet:
+		classicOK(w, r.routes)
+	case req.Method == http.MethodPost && id == "":
+		if code := r.routeInvalidLocked(body, ""); code != "" {
+			classicErr(w, http.StatusBadRequest, code)
+			return
+		}
+		body["_id"] = r.id()
+		r.routes = append(r.routes, body)
+		classicOK(w, []map[string]any{body})
+	case req.Method == http.MethodPut:
+		i := find()
+		if i < 0 {
+			classicErr(w, http.StatusBadRequest, "api.err.IdInvalid")
+			return
+		}
+		merged := map[string]any{}
+		for k, v := range r.routes[i] {
+			merged[k] = v
+		}
+		for k, v := range body {
+			merged[k] = v
+		}
+		if code := r.routeInvalidLocked(merged, id); code != "" {
+			classicErr(w, http.StatusBadRequest, code)
+			return
+		}
+		r.routes[i] = merged
+		classicOK(w, []map[string]any{merged})
+	case req.Method == http.MethodDelete:
+		i := find()
+		if i < 0 {
+			classicErr(w, http.StatusBadRequest, "api.err.IdInvalid")
+			return
+		}
+		r.routes = append(r.routes[:i], r.routes[i+1:]...)
+		classicOK(w, []any{})
+	default:
+		classicErr(w, http.StatusBadRequest, "api.err.InvalidRequest")
+	}
 }
 
 // BlockTraffic makes a connection that is up carry no traffic (as a line
@@ -937,6 +1048,8 @@ func New() *Router {
 		"x_passphrase": "home-password", "networkconf_id": NetworkID, "wlan_bands": []any{"2g", "5g", "6g"}}}
 	r.schedule = map[string]any{"_id": "set-super-mgmt", "key": "super_mgmt", "autobackup_enabled": true,
 		"autobackup_cron_expr": "30 0 1 * *", "autobackup_timezone": "Europe/Dublin", "autobackup_days": 0}
+	mux.HandleFunc("/proxy/network/api/s/default/rest/routing", r.routing)
+	mux.HandleFunc("/proxy/network/api/s/default/rest/routing/", r.routing)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/portforward", r.portForwards)
 	mux.HandleFunc("/proxy/network/api/s/default/rest/portforward/", r.portForwards)
 	mux.HandleFunc("/proxy/network/api/s/default/stat/health", r.statHandler(func() any { return r.stat.Health }))

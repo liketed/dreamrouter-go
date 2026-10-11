@@ -16,7 +16,7 @@ go get github.com/liketed/dreamrouter-go
 
 | Package | Contents |
 |---|---|
-| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, backups and restores (with the automatic backup schedule), SSH settings, networks (VLANs) and Wi-Fi networks, internet connections (WAN) and port roles, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
+| [`unifi`](unifi) | API client: login (with retries while the router's login limit is reached), static DNS records, clients (DHCP reservations, device DNS names, names and notes, blocking), connected and recently seen devices, port forwarding rules, backups and restores (with the automatic backup schedule), SSH settings, networks (VLANs) and Wi-Fi networks, internet connections (WAN) and port roles, static routes, the router's status (`GetStatus`: versions, internet, load, clients, firmware, speed test), current DHCP leases, networks and their DHCP settings. Optional shared cache for concurrent readers. |
 | [`check`](check) | Validation that mirrors the router's rules: DNS records of every type (per field or as a single error), MAC and IPv4 addresses, which network a reserved IP belongs to, network boot / TFTP values, and port forwards (including the conflicts the router doesn't check). |
 | [`fakerouter`](fakerouter) | An in-memory fake of the router's API for tests, with the router's error codes and login limit. |
 
@@ -140,6 +140,11 @@ These are behaviours of the router itself, found while building drctl and the pr
   (`api.err.WanFailOverPriorityAlreadyExists`), so `SetPrimaryWAN` swaps in three steps via a
   free priority. The device's `uplink` shows the connection traffic actually uses
   (`ActiveWAN`); it catches up some seconds after traffic moves.
+- **Static routes** (`rest/routing`, `static-route_network`, `static-route_nexthop`,
+  `static-route_distance`, type `nexthop-route`): the router checks the network form, routes
+  to its own networks, duplicate networks, distances (1–255) and default routes, but
+  accepts next hops it can't reach, itself as next hop, and duplicate names. Use
+  `check.StaticRoute` first.
 - **Status** (`GetStatus`) combines `stat/health`, `stat/sysinfo` and the router's entry
   in `stat/device`. Some numbers come as strings (CPU `"13.9"`), others as numbers, and
   the access point and switch counts include the router's built-in Wi-Fi and switch.

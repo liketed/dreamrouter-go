@@ -64,6 +64,8 @@ const (
 	CodeInvalidDHCPRange          = "api.err.InvalidDHCPRange"
 	CodeInvalidPPPoECredentials   = "api.err.InvalidWanPppoeCredentials"
 	CodeWANPriorityExists         = "api.err.WanFailOverPriorityAlreadyExists"
+	CodeRouteToConnectedNetwork   = "api.err.NoRoutesToDirectlyConnectedNetworks"
+	CodeRouteNetworkExists        = "api.err.DestinationNetworkExisted"
 	CodeLoginLimitReached         = "AUTHENTICATION_FAILED_LIMIT_REACHED"
 	CodeInvalidUsernameOrPassword = "AUTHENTICATION_FAILED_INVALID_CREDENTIALS"
 )
@@ -368,6 +370,12 @@ func describeCode(code string) string {
 		return "the router rejected the request as invalid"
 	case "api.err.NotFound", CodeIDInvalid:
 		return "not found"
+	case CodeRouteToConnectedNetwork:
+		return "the router is directly connected to this network; it needs no route"
+	case CodeRouteNetworkExists:
+		return "a static route for this network already exists"
+	case "api.err.InvalidDestinationNetwork":
+		return "the destination must be a network, e.g. 192.168.2.0/24"
 	case CodeWANPriorityExists:
 		return "another internet connection already has this priority"
 	case CodeInvalidPPPoECredentials:

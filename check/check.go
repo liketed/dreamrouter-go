@@ -569,3 +569,58 @@ func WAN(w *unifi.WAN) error {
 	}
 	return nil
 }
+
+// StaticRoute checks a static route against the router's networks and
+// other routes, and puts the network in its canonical form: a private or
+// public IPv4 network (not the default route, and not one of the router's
+// own networks), a next hop that is a host on one of the LANs (the router
+// accepts next hops it can't reach, and itself, which would loop), a unique
+// name and network, and a distance from 1 to 255.
+func StaticRoute(r *unifi.StaticRoute, networks []unifi.Network, others []unifi.StaticRoute) error {
+	r.Name = strings.TrimSpace(r.Name)
+	if r.Name == "" {
+		return fmt.Errorf("a route needs a name")
+	}
+	p, err := netip.ParsePrefix(strings.TrimSpace(r.Network))
+	if err != nil || !p.Addr().Is4() {
+		return fmt.Errorf("network %q must be a network such as 192.168.2.0/24", r.Network)
+	}
+	if p.Bits() == 0 {
+		return fmt.Errorf("a default route (0.0.0.0/0) can't be a static route; the internet connections are the default")
+	}
+	if p != p.Masked() {
+		return fmt.Errorf("network %s should be written %s", p, p.Masked())
+	}
+	r.Network = p.String()
+	if r.Distance == 0 {
+		r.Distance = 1
+	}
+	if r.Distance < 1 || r.Distance > 255 {
+		return fmt.Errorf("distance %d must be from 1 to 255", r.Distance)
+	}
+	hop, err := IPv4(r.NextHop)
+	if err != nil {
+		return fmt.Errorf("next hop: %w", err)
+	}
+	if _, err := NetworkFor(networks, hop, ""); err != nil {
+		return fmt.Errorf("next hop: %w; it must be a router on one of your networks", err)
+	}
+	r.NextHop = hop.String()
+	for _, n := range networks {
+		if np, err := netip.ParsePrefix(n.Subnet); err == nil && np.Masked().Overlaps(p) {
+			return fmt.Errorf("network %s overlaps the router's own network %q (%s)", p, n.Name, np.Masked())
+		}
+	}
+	for _, o := range others {
+		if o.ID != "" && o.ID == r.ID {
+			continue
+		}
+		if strings.EqualFold(o.Name, r.Name) {
+			return fmt.Errorf("a route named %q already exists", o.Name)
+		}
+		if op, err := netip.ParsePrefix(o.Network); err == nil && op == p {
+			return fmt.Errorf("route %q already covers %s", o.Name, p)
+		}
+	}
+	return nil
+}
