@@ -63,6 +63,7 @@ const (
 	CodeVLANUsed                  = "api.err.VlanUsed"
 	CodeInvalidDHCPRange          = "api.err.InvalidDHCPRange"
 	CodeInvalidPPPoECredentials   = "api.err.InvalidWanPppoeCredentials"
+	CodeWANPriorityExists         = "api.err.WanFailOverPriorityAlreadyExists"
 	CodeLoginLimitReached         = "AUTHENTICATION_FAILED_LIMIT_REACHED"
 	CodeInvalidUsernameOrPassword = "AUTHENTICATION_FAILED_INVALID_CREDENTIALS"
 )
@@ -367,6 +368,8 @@ func describeCode(code string) string {
 		return "the router rejected the request as invalid"
 	case "api.err.NotFound", CodeIDInvalid:
 		return "not found"
+	case CodeWANPriorityExists:
+		return "another internet connection already has this priority"
 	case CodeInvalidPPPoECredentials:
 		return "PPPoE needs a username and a password"
 	case "api.err.MissingQosTag":

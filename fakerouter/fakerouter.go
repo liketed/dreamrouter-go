@@ -122,6 +122,18 @@ type Router struct {
 	portLinks   map[string]bool   // interface -> cable connected
 	pppoeOK     map[string]bool   // PPPoE usernames the "provider" accepts
 	portWrites  int
+	noTraffic   map[string]bool // network groups that are up but carry no traffic
+}
+
+// BlockTraffic makes a connection that is up carry no traffic (as a line
+// whose provider routes nothing), so it never becomes the active uplink.
+func (r *Router) BlockTraffic(group string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.noTraffic == nil {
+		r.noTraffic = map[string]bool{}
+	}
+	r.noTraffic[group] = true
 }
 
 var fakePorts = []struct {
@@ -224,6 +236,32 @@ func (r *Router) devicesLocked() []map[string]any {
 					}
 				}
 				c[key] = link
+			}
+			// Traffic goes out through the up connection with the best
+			// priority, preferring ones that aren't failover-only.
+			best, bestRank := "", 1e9
+			for _, n := range r.networks {
+				if n["purpose"] != "wan" {
+					continue
+				}
+				group, _ := n["wan_networkgroup"].(string)
+				if _, up := r.wanUpLocked(group); !up || r.noTraffic[group] {
+					continue
+				}
+				rank, _ := n["wan_failover_priority"].(float64)
+				if n["wan_load_balance_type"] == "failover-only" {
+					rank += 1000
+				}
+				if rank < bestRank {
+					best, bestRank = group, rank
+				}
+			}
+			if best != "" {
+				src := c[map[string]string{"WAN": "wan1", "WAN2": "wan2"}[best]].(map[string]any)
+				c["uplink"] = map[string]any{"name": map[string]string{"WAN": "ppp0", "WAN2": "ppp1"}[best], "ip": src["ip"], "up": true,
+					"speed": 10000, "latency": 15}
+			} else {
+				c["uplink"] = map[string]any{"name": "", "up": false}
 			}
 		}
 		out = append(out, c)
@@ -1481,6 +1519,12 @@ func (r *Router) networkItem(w http.ResponseWriter, req *http.Request) {
 			if code := fakeWANInvalid(updated); code != "" {
 				classicErr(w, http.StatusBadRequest, code)
 				return
+			}
+			for _, o := range r.networks {
+				if o["_id"] != id && o["purpose"] == "wan" && o["wan_failover_priority"] != nil && o["wan_failover_priority"] == updated["wan_failover_priority"] {
+					classicErr(w, http.StatusBadRequest, "api.err.WanFailOverPriorityAlreadyExists")
+					return
+				}
 			}
 		}
 		updated["setting_preference"] = "manual" // as the web UI does on every save

@@ -28,8 +28,9 @@ type WAN struct {
 	Gateway string `json:"wan_gateway"`
 	// FailoverPriority 1 is the primary connection; LoadBalanceType is e.g.
 	// "weighted" or "failover-only".
-	FailoverPriority int    `json:"wan_failover_priority"`
-	LoadBalanceType  string `json:"wan_load_balance_type"`
+	FailoverPriority  int    `json:"wan_failover_priority"`
+	LoadBalanceType   string `json:"wan_load_balance_type"`
+	LoadBalanceWeight int    `json:"wan_load_balance_weight"`
 }
 
 // ListWANs returns the internet connections, primary first.
@@ -106,8 +107,9 @@ type rawGateway struct {
 		Up    bool    `json:"up"`
 		Speed flexNum `json:"speed"`
 	} `json:"port_table"`
-	WAN1 rawWANLink `json:"wan1"`
-	WAN2 rawWANLink `json:"wan2"`
+	WAN1   rawWANLink `json:"wan1"`
+	WAN2   rawWANLink `json:"wan2"`
+	Uplink rawWANLink `json:"uplink"`
 }
 
 type rawWANLink struct {
@@ -185,4 +187,86 @@ func (c *Client) SetPortRoles(ctx context.Context, roles map[string]string) erro
 	}
 	var env classicEnvelope
 	return c.write(ctx, http.MethodPut, c.classic("/rest/device/"+g.ID), map[string]any{"ethernet_overrides": overrides}, &env)
+}
+
+// IsPrimary reports whether the connection is the primary one (priority 1,
+// not failover-only).
+func (w WAN) IsPrimary() bool {
+	return w.FailoverPriority == 1 && w.LoadBalanceType != "failover-only"
+}
+
+// SetPrimaryWAN makes the connection with this ID the primary one: new
+// traffic goes out through it, and the previous primary becomes its
+// failover. The router refuses two connections with the same priority, so
+// this takes three steps: the old primary moves to a free priority, the new
+// one takes priority 1, and the old one takes the new one's old priority as
+// failover-only. Connections that are open at the time break and reconnect.
+func (c *Client) SetPrimaryWAN(ctx context.Context, id string) error {
+	wans, err := c.ListWANs(ctx)
+	if err != nil {
+		return err
+	}
+	var target, old *WAN
+	free := 1
+	for i := range wans {
+		if wans[i].ID == id {
+			target = &wans[i]
+		}
+		if wans[i].IsPrimary() {
+			old = &wans[i]
+		}
+		if wans[i].FailoverPriority >= free {
+			free = wans[i].FailoverPriority + 1
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("no internet connection with ID %q", id)
+	}
+	if target.IsPrimary() {
+		return nil
+	}
+	if old == nil {
+		return fmt.Errorf("no connection is primary now; set one in the web UI first")
+	}
+	weight := old.LoadBalanceWeight
+	if weight == 0 {
+		weight = 99
+	}
+	targetPriority := target.FailoverPriority
+	if targetPriority == 0 || targetPriority == 1 {
+		targetPriority = free + 1
+	}
+	steps := []struct {
+		id     string
+		fields map[string]any
+	}{
+		{old.ID, map[string]any{"wan_failover_priority": free}},
+		{target.ID, map[string]any{"wan_failover_priority": 1, "wan_load_balance_type": "weighted", "wan_load_balance_weight": weight}},
+		{old.ID, map[string]any{"wan_failover_priority": targetPriority, "wan_load_balance_type": "failover-only"}},
+	}
+	for i, s := range steps {
+		if _, err := c.UpdateWAN(ctx, s.id, s.fields); err != nil {
+			return fmt.Errorf("step %d of 3: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// ActiveWAN returns the network group ("WAN" or "WAN2") of the connection
+// that carries traffic now, from the router's active uplink. The router
+// updates this some seconds after traffic actually moves.
+func (c *Client) ActiveWAN(ctx context.Context) (string, error) {
+	g, err := c.gateway(ctx)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case g.Uplink.IP == "":
+		return "", nil
+	case g.Uplink.IP == g.WAN1.IP:
+		return "WAN", nil
+	case g.Uplink.IP == g.WAN2.IP:
+		return "WAN2", nil
+	}
+	return "", nil
 }

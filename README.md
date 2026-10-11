@@ -135,6 +135,11 @@ These are behaviours of the router itself, found while building drctl and the pr
   with `PUT rest/device/{id}`; the web UI numbers ports from 1 (Port 3 is `eth2`). Right
   after a change the router still reports the old link state for several seconds, so
   wait before judging whether a connection came back.
+- **The primary connection** is the one with `wan_failover_priority` 1 that isn't
+  `failover-only`. The router refuses two connections with the same priority
+  (`api.err.WanFailOverPriorityAlreadyExists`), so `SetPrimaryWAN` swaps in three steps via a
+  free priority. The device's `uplink` shows the connection traffic actually uses
+  (`ActiveWAN`); it catches up some seconds after traffic moves.
 - **Status** (`GetStatus`) combines `stat/health`, `stat/sysinfo` and the router's entry
   in `stat/device`. Some numbers come as strings (CPU `"13.9"`), others as numbers, and
   the access point and switch counts include the router's built-in Wi-Fi and switch.

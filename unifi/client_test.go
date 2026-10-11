@@ -797,3 +797,44 @@ func TestWANsAndPorts(t *testing.T) {
 		t.Fatal("two ports for Internet 1 accepted")
 	}
 }
+
+func TestSetPrimaryWAN(t *testing.T) {
+	r := fakerouter.New()
+	defer r.Close()
+	r.AddWAN2()
+	r.AcceptPPPoE("eir@eir.ie")
+	r.SetPortLink("eth4", true)
+	c := newClient(t, r, nil)
+	ctx := context.Background()
+	wans, _ := c.ListWANs(ctx)
+	if active, err := c.ActiveWAN(ctx); err != nil || active != "WAN" || !wans[0].IsPrimary() || wans[1].IsPrimary() {
+		t.Fatalf("before: active %q, %v, primary %v/%v", active, err, wans[0].IsPrimary(), wans[1].IsPrimary())
+	}
+	// Two connections can't share a priority.
+	if _, err := c.UpdateWAN(ctx, wans[1].ID, map[string]any{"wan_failover_priority": 1}); !unifi.HasCode(err, unifi.CodeWANPriorityExists) {
+		t.Fatalf("duplicate priority: %v", err)
+	}
+	if err := c.SetPrimaryWAN(ctx, wans[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	wans, _ = c.ListWANs(ctx)
+	if !wans[1].IsPrimary() || wans[0].IsPrimary() || wans[0].LoadBalanceType != "failover-only" || wans[0].FailoverPriority != 2 || wans[1].LoadBalanceWeight != 99 {
+		t.Fatalf("after: %+v", wans)
+	}
+	if active, _ := c.ActiveWAN(ctx); active != "WAN2" {
+		t.Fatalf("active after the switch: %q", active)
+	}
+	if err := c.SetPrimaryWAN(ctx, wans[1].ID); err != nil {
+		t.Fatalf("already primary: %v", err)
+	}
+	if err := c.SetPrimaryWAN(ctx, wans[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	wans, _ = c.ListWANs(ctx)
+	if !wans[0].IsPrimary() || wans[1].FailoverPriority != 2 || wans[1].LoadBalanceType != "failover-only" {
+		t.Fatalf("back: %+v", wans)
+	}
+	if active, _ := c.ActiveWAN(ctx); active != "WAN" {
+		t.Fatalf("active after switching back: %q", active)
+	}
+}
